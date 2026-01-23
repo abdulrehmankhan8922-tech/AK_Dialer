@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  asterisk:
+    image: andrius/asterisk:latest
+    container_name: dialer-asterisk
+    ports:
+      - "5038:5038"    # AMI port
+      - "5060:5060/udp"  # SIP port (UDP)
+      - "5060:5060/tcp"  # SIP port (TCP)
+      - "10000-10099:10000-10099/udp"  # RTP ports for audio
+    volumes:
+      - ./asterisk-config:/etc/asterisk
+      - ./asterisk-logs:/var/log/asterisk
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+    networks:
+      - dialer-network
+
+networks:
+  dialer-network:
+    driver: bridge
