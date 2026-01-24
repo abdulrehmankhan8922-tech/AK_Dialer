@@ -12,7 +12,7 @@
 
 ## 🔧 Prerequisites
 
-### Required Software:
+### Required Software: 
 - ✅ PostgreSQL database (running and configured)
 - ✅ Asterisk installed and running (for real telephony testing)
 - ✅ SIP phone/softphone (Zoiper, X-Lite, Linphone) for agent

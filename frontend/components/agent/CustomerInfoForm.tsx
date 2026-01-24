@@ -29,13 +29,18 @@ export default function CustomerInfoForm({ currentCall, campaigns }: CustomerInf
     // Load contact data if call has contact_id
     if (currentCall?.contact_id) {
       contactsAPI.get(currentCall.contact_id).then((contact) => {
+        // Ensure gender is one of the valid values
+        const validGender = (contact.gender === 'M' || contact.gender === 'F' || contact.gender === 'U') 
+          ? contact.gender 
+          : 'U' as 'M' | 'F' | 'U'
+        
         setFormData({
           name: contact.name || '',
           phone: contact.phone || '',
           address: contact.address || '',
           city: contact.city || '',
           occupation: contact.occupation || '',
-          gender: contact.gender,
+          gender: validGender,
           whatsapp: contact.whatsapp || '',
           email: contact.email || '',
           comments: contact.comments || '',
