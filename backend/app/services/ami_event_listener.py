@@ -495,6 +495,8 @@ class AMIEventListener:
         """Disconnect from AMI"""
         if self.connection:
             try:
+                # Set socket to non-blocking for quick shutdown
+                self.connection.settimeout(0.1)
                 logout_action = self._build_ami_action('Logoff')
                 self.connection.send(logout_action.encode('utf-8'))
             except:

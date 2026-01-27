@@ -44,8 +44,19 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Grainbox Dialer API...")
     if not settings.USE_MOCK_DIALER:
         try:
-            await ami_event_listener.stop_listening()
+            # Set a timeout for shutdown to avoid hanging
+            await asyncio.wait_for(ami_event_listener.stop_listening(), timeout=5.0)
             logger.info("AMI event listener stopped")
+        except asyncio.TimeoutError:
+            logger.warning("AMI event listener shutdown timed out, forcing disconnect")
+            # Force disconnect
+            if ami_event_listener.connection:
+                try:
+                    ami_event_listener.connection.close()
+                except:
+                    pass
+                ami_event_listener.connection = None
+                ami_event_listener.connected = False
         except Exception as e:
             logger.error(f"Error stopping AMI event listener: {e}")
 

@@ -9,7 +9,7 @@ User=root
 WorkingDirectory=/root/AK_Dialer/backend
 Environment="PATH=/root/AK_Dialer/backend/venv/bin:/usr/local/bin:/usr/bin:/bin"
 # Database Configuration
-Environment="DATABASE_URL=postgresql://your_username:your_password@localhost:5432/your_database"
+Environment="DATABASE_URL=postgresql://ak_dialer_user:dialer_password_123@localhost:5432/dialer_db"
 # Security
 Environment="SECRET_KEY=your-secret-key-change-in-production"
 Environment="ALGORITHM=HS256"
@@ -23,7 +23,7 @@ Environment="ASTERISK_AMI_PASSWORD=amp111"
 Environment="ASTERISK_CONTEXT=from-internal"
 Environment="ASTERISK_TRUNK=PJSIP/trunk"
 # CORS
-Environment="CORS_ORIGINS=http://163.245.208.168:3000,http://localhost:3000"
+Environment="CORS_ORIGINS=[\"http://163.245.208.168:3000\",\"http://localhost:3000\"]"
 # Call Settings
 Environment="DEFAULT_CALL_TIMEOUT=60"
 Environment="MAX_CONCURRENT_CALLS=10"
@@ -31,7 +31,10 @@ Environment="MAX_CONCURRENT_CALLS=10"
 ExecStartPre=/bin/bash -c 'until pg_isready -h localhost -p 5432; do sleep 1; done'
 # Increase startup timeout to allow AMI connection
 TimeoutStartSec=300
-TimeoutStopSec=30
+TimeoutStopSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
 ExecStart=/root/AK_Dialer/backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=10
