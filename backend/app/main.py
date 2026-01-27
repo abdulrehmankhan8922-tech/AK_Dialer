@@ -25,11 +25,13 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up Grainbox Dialer API...")
     
     # Start AMI event listener if not using mock dialer
+    # Start in background to avoid blocking startup
     if not settings.USE_MOCK_DIALER:
         try:
-            logger.info("Starting AMI event listener...")
-            await ami_event_listener.start_listening()
-            logger.info("AMI event listener started successfully")
+            logger.info("Starting AMI event listener in background...")
+            # Start in background task to avoid blocking startup
+            asyncio.create_task(ami_event_listener.start_listening())
+            logger.info("AMI event listener start initiated (will connect in background)")
         except Exception as e:
             logger.error(f"Failed to start AMI event listener: {e}")
             logger.warning("Continuing without AMI event listener (calls may not update in real-time)")

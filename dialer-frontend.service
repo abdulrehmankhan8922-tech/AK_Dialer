@@ -1,0 +1,23 @@
+[Unit]
+Description=AK Dialer Frontend
+After=network.target dialer-backend.service
+Requires=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/AK_Dialer/frontend
+Environment="NODE_ENV=production"
+Environment="PORT=3000"
+Environment="NEXT_PUBLIC_API_URL=http://163.245.208.168:8000"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+# Build the app before starting
+ExecStartPre=/usr/bin/npm run build
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
