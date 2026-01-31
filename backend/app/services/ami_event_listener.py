@@ -69,12 +69,38 @@ class AMIEventListener:
             if self.connected and self.connection:
                 return True
             
+            # Use thread executor for blocking socket operations to avoid blocking event loop
+            loop = asyncio.get_event_loop()
             self.connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.connection.settimeout(10)
-            self.connection.connect((self.host, self.port))
+            self.connection.settimeout(5)  # 5 second timeout
             
-            # Read welcome message
-            welcome = self.connection.recv(4096).decode('utf-8', errors='ignore')
+            # Run blocking connect in thread executor with timeout
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, self.connection.connect, (self.host, self.port)),
+                    timeout=10.0  # 10 second async timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"AMI connection timeout to {self.host}:{self.port}")
+                if self.connection:
+                    try:
+                        self.connection.close()
+                    except:
+                        pass
+                    self.connection = None
+                return False
+            except Exception as e:
+                logger.error(f"AMI connection error: {e}")
+                if self.connection:
+                    try:
+                        self.connection.close()
+                    except:
+                        pass
+                    self.connection = None
+                return False
+            
+            # Read welcome message (non-blocking)
+            welcome = await loop.run_in_executor(None, lambda: self.connection.recv(4096).decode('utf-8', errors='ignore'))
             if 'Asterisk Call Manager' not in welcome:
                 logger.warning(f"Unexpected welcome message: {welcome[:100]}")
                 return False
@@ -85,8 +111,8 @@ class AMIEventListener:
                 'Secret': self.password
             })
             
-            self.connection.send(login_action.encode('utf-8'))
-            response = self.connection.recv(4096).decode('utf-8', errors='ignore')
+            await loop.run_in_executor(None, lambda: self.connection.send(login_action.encode('utf-8')))
+            response = await loop.run_in_executor(None, lambda: self.connection.recv(4096).decode('utf-8', errors='ignore'))
             
             parsed = self._parse_ami_event(response)
             if parsed.get('Response') == 'Success':
@@ -97,7 +123,7 @@ class AMIEventListener:
                 subscribe_action = self._build_ami_action('Events', {
                     'EventMask': 'on'  # Enable all events
                 })
-                self.connection.send(subscribe_action.encode('utf-8'))
+                await loop.run_in_executor(None, lambda: self.connection.send(subscribe_action.encode('utf-8')))
                 # Don't wait for response, just send it
                 
                 return True
@@ -112,20 +138,58 @@ class AMIEventListener:
             return False
     
     async def start_listening(self):
-        """Start listening to AMI events"""
+        """Start listening to AMI events - completely non-blocking"""
         if self.running:
             logger.warning("AMI event listener already running")
             return
         
-        if not await self.connect():
-            logger.error("Failed to connect to AMI, event listener not started")
-            return
-        
         self.running = True
-        logger.info("Starting AMI event listener")
+        logger.info("Starting AMI event listener (will connect in background)")
         
-        # Start listener in background
-        self.listener_task = asyncio.create_task(self._event_loop())
+        # Start connection retry loop in background - don't wait for it
+        self.listener_task = asyncio.create_task(self._connection_and_event_loop())
+    
+    async def _connection_and_event_loop(self):
+        """Connect and then start event loop - runs in background"""
+        max_retries = 5
+        retry_count = 0
+        
+        while self.running and retry_count < max_retries:
+            try:
+                # Try to connect with short timeout
+                connected = await asyncio.wait_for(self.connect(), timeout=10.0)
+                if connected:
+                    logger.info("AMI connected successfully, starting event listener")
+                    # Start the actual event loop
+                    await self._event_loop()
+                    break
+                else:
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        logger.warning(f"AMI connection failed, retrying in 10s (attempt {retry_count}/{max_retries})...")
+                        await asyncio.sleep(10)
+                    else:
+                        logger.error("AMI connection failed after max retries, giving up")
+                        self.running = False
+                        break
+            except asyncio.TimeoutError:
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.warning(f"AMI connection timeout, retrying in 10s (attempt {retry_count}/{max_retries})...")
+                    await asyncio.sleep(10)
+                else:
+                    logger.error("AMI connection timeout after max retries, giving up")
+                    self.running = False
+                    break
+            except Exception as e:
+                logger.error(f"AMI connection error: {e}, retrying in 10s...")
+                retry_count += 1
+                if retry_count < max_retries:
+                    await asyncio.sleep(10)
+                else:
+                    logger.error("AMI connection failed after max retries, giving up")
+                    self.running = False
+                    break
     
     async def stop_listening(self):
         """Stop listening to AMI events"""
@@ -160,7 +224,8 @@ class AMIEventListener:
                 # Read data from socket (non-blocking with timeout)
                 try:
                     self.connection.settimeout(1.0)
-                    data = self.connection.recv(4096).decode('utf-8', errors='ignore')
+                    loop = asyncio.get_event_loop()
+                    data = await loop.run_in_executor(None, lambda: self.connection.recv(4096).decode('utf-8', errors='ignore'))
                     if not data:
                         # Connection closed
                         self.connected = False
