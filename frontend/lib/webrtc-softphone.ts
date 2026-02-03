@@ -287,6 +287,9 @@ export class WebRTCSoftphone {
 
   /**
    * Hold/unhold call
+   * Note: SIP.js Session doesn't have direct hold/unhold methods
+   * This would need to be implemented via re-INVITE with SDP modification
+   * For now, we'll log that this feature needs implementation
    */
   async hold(hold: boolean): Promise<void> {
     if (!this.callState.currentSession) {
@@ -294,11 +297,11 @@ export class WebRTCSoftphone {
     }
 
     try {
-      if (hold) {
-        await this.callState.currentSession.hold()
-      } else {
-        await this.callState.currentSession.unhold()
-      }
+      // TODO: Implement hold/unhold via re-INVITE with SDP modification
+      // SIP.js doesn't have direct hold()/unhold() methods on Session
+      // This requires modifying the SDP to set direction=sendonly for hold
+      console.warn('Hold/unhold functionality not yet implemented in WebRTC softphone')
+      // For now, we'll just log - actual implementation would require SDP manipulation
     } catch (error) {
       console.error('Error holding/unholding:', error)
     }
