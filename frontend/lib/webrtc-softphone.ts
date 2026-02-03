@@ -15,7 +15,6 @@ import {
   Session,
   RegistererState as RegistererStateEnum
 } from 'sip.js'
-import { Web } from 'sip.js/lib/platform/web'
 
 export interface SoftphoneConfig {
   server: string // Asterisk WebRTC server (e.g., wss://163.245.208.168:8089/ws)
@@ -63,6 +62,7 @@ export class WebRTCSoftphone {
       const domain = this.config.server.replace(/^wss?:\/\//, '').split('/')[0].split(':')[0]
       
       // Create WebRTC user agent
+      // SIP.js will auto-detect browser environment and use WebRTC
       const userAgentOptions: any = {
         uri: UserAgent.makeURI(`sip:${this.config.username}@${domain}`),
         transportOptions: {
@@ -74,7 +74,6 @@ export class WebRTCSoftphone {
         delegate: {
           onInvite: (invitation: Invitation) => this.handleIncomingCall(invitation),
         },
-        sessionDescriptionHandlerFactory: Web.sessionDescriptionHandlerFactory,
       }
 
       this.userAgent = new UserAgent(userAgentOptions)
