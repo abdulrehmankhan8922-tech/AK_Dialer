@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.routes import auth, agents, calls, campaigns, stats, contacts, admin, recordings
+from app.api.routes import auth, agents, calls, campaigns, stats, contacts, admin, recordings, asterisk_config
 
 api_router = APIRouter()
 
@@ -11,3 +11,4 @@ api_router.include_router(campaigns.router)
 api_router.include_router(stats.router)
 api_router.include_router(contacts.router)
 api_router.include_router(admin.router)
+api_router.include_router(asterisk_config.router)
