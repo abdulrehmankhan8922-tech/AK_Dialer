@@ -1,4 +1,4 @@
-# Grainbox Dialer - Backend API
+# AK Dialer - Backend API
 
 ## Setup
 
@@ -9,7 +9,7 @@ pip install -r requirements.txt
 
 2. Setup PostgreSQL database:
 ```bash
-createdb grainbox_dialer
+createdb ak_dialer
 ```
 
 3. Configure environment variables:

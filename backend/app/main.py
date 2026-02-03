@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Manage application lifespan - startup and shutdown"""
     # Startup
-    logger.info("Starting up Grainbox Dialer API...")
+    logger.info("Starting up AK Dialer API...")
     
     # Start AMI event listener if not using mock dialer
     # Start in background to avoid blocking startup - completely fire and forget
@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("Shutting down Grainbox Dialer API...")
+    logger.info("Shutting down AK Dialer API...")
     if not settings.USE_MOCK_DIALER:
         try:
             # Set a timeout for shutdown to avoid hanging
@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Grainbox Dialer API",
+    title="AK Dialer API",
     description="Auto-dialer solution API",
     version="1.0.0",
     lifespan=lifespan
@@ -111,7 +111,7 @@ app.include_router(websocket_router)
 @app.get("/")
 async def root():
     return {
-        "message": "Grainbox Dialer API",
+        "message": "AK Dialer API",
         "version": "1.0.0",
         "status": "running"
     }

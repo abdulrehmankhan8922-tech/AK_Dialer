@@ -109,7 +109,7 @@ def create_admin_user():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("Grainbox Dialer - Database Setup")
+    print("AK Dialer - Database Setup")
     print("=" * 50)
     
     setup_database()

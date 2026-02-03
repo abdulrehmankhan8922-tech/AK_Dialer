@@ -1,4 +1,4 @@
-# Grainbox Dialer - Full-Featured Auto-Dialer
+# AK Dialer - Full-Featured Auto-Dialer
 
 A comprehensive auto-dialer solution built with Next.js (frontend) and FastAPI (backend), matching ViciDial functionality with modern architecture.
 
@@ -83,7 +83,7 @@ pip install -r requirements.txt
 
 4. Setup PostgreSQL database:
 ```bash
-createdb grainbox_dialer
+createdb ak_dialer
 ```
 
 5. Configure environment variables:
