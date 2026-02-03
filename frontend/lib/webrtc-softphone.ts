@@ -61,10 +61,16 @@ export class WebRTCSoftphone {
       // Extract domain from server URL
       const domain = this.config.server.replace(/^wss?:\/\//, '').split('/')[0].split(':')[0]
       
+      // Create URI for user agent
+      const userURI = UserAgent.makeURI(`sip:${this.config.username}@${domain}`)
+      if (!userURI) {
+        throw new Error(`Invalid user URI: sip:${this.config.username}@${domain}`)
+      }
+      
       // Create WebRTC user agent
       // SIP.js will auto-detect browser environment and use WebRTC
       const userAgentOptions: any = {
-        uri: UserAgent.makeURI(`sip:${this.config.username}@${domain}`),
+        uri: userURI,
         transportOptions: {
           server: this.config.server,
         },
@@ -142,6 +148,10 @@ export class WebRTCSoftphone {
     try {
       const domain = this.config.server.replace(/^wss?:\/\//, '').split('/')[0].split(':')[0]
       const targetURI = UserAgent.makeURI(`sip:${phoneNumber}@${domain}`)
+      
+      if (!targetURI) {
+        throw new Error(`Invalid target URI: sip:${phoneNumber}@${domain}`)
+      }
       
       const inviter = new Inviter(this.userAgent, targetURI, {
         sessionDescriptionHandlerOptions: {
