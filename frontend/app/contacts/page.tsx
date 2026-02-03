@@ -15,6 +15,9 @@ export default function ContactsPage() {
   const [selectedCampaign, setSelectedCampaign] = useState<string>('all')
   const [searchTerm, setSearchTerm] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
+  const [showImportModal, setShowImportModal] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null)
   const [currentTime, setCurrentTime] = useState(new Date())
 
   useEffect(() => {
@@ -104,6 +107,44 @@ export default function ContactsPage() {
     loadContacts()
   }
 
+  const handleFileImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (!file.name.endsWith('.xlsx') && !file.name.endsWith('.xls')) {
+      alert('Please select an Excel file (.xlsx or .xls)')
+      return
+    }
+
+    if (selectedCampaign === 'all') {
+      alert('Please select a campaign first')
+      return
+    }
+
+    setImporting(true)
+    setImportResult(null)
+
+    try {
+      const campaignId = parseInt(selectedCampaign)
+      const result = await contactsAPI.import(file, campaignId)
+      setImportResult({
+        imported: result.imported,
+        skipped: result.skipped,
+        errors: result.errors || []
+      })
+      
+      if (result.imported > 0) {
+        loadContacts()
+      }
+    } catch (error: any) {
+      alert(`Import failed: ${error.response?.data?.detail || error.message}`)
+    } finally {
+      setImporting(false)
+      // Reset file input
+      event.target.value = ''
+    }
+  }
+
   return (
     <DashboardLayout
       timeString={formatDateTime(currentTime)}
@@ -118,13 +159,54 @@ export default function ContactsPage() {
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Contacts</h1>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-semibold"
-          >
-            + Add Contact
-          </button>
+          <div className="flex gap-2">
+            <label className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md font-semibold cursor-pointer">
+              {importing ? 'Importing...' : '📥 Import Excel'}
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={handleFileImport}
+                disabled={importing}
+                className="hidden"
+              />
+            </label>
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-semibold"
+            >
+              + Add Contact
+            </button>
+          </div>
         </div>
+
+        {/* Import Result */}
+        {importResult && (
+          <div className={`p-4 rounded-lg ${
+            importResult.imported > 0 
+              ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800' 
+              : 'bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800'
+          }`}>
+            <div className="font-semibold text-slate-900 dark:text-slate-100 mb-2">
+              Import Complete
+            </div>
+            <div className="text-sm text-slate-700 dark:text-slate-300">
+              ✅ Imported: {importResult.imported} contacts<br/>
+              ⚠️ Skipped: {importResult.skipped} contacts
+              {importResult.errors.length > 0 && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer text-red-600 dark:text-red-400">
+                    View Errors ({importResult.errors.length})
+                  </summary>
+                  <ul className="mt-2 list-disc list-inside text-xs max-h-40 overflow-y-auto">
+                    {importResult.errors.map((error, idx) => (
+                      <li key={idx} className="text-red-600 dark:text-red-400">{error}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Filters */}
         <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-4 shadow-card">

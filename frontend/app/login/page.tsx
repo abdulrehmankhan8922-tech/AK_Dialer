@@ -86,9 +86,6 @@ export default function LoginPage() {
               <div className="flex-1">
                 <p className="font-semibold">Login Error</p>
                 <p className="text-sm mt-1">{error}</p>
-                <p className="text-xs mt-2 text-red-500 dark:text-red-300">
-                  💡 Tip: For Agent use <strong>8013</strong> / <strong>password</strong>. For Admin use <strong>admin</strong> / <strong>admin</strong>
-                </p>
               </div>
             </div>
           )}

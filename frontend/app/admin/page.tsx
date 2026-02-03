@@ -4,8 +4,9 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import DashboardLayout from '@/components/shared/DashboardLayout'
 import AgentAddEditModal from '@/components/shared/AgentAddEditModal'
+import CampaignAddEditModal from '@/components/shared/CampaignAddEditModal'
 import { adminAPI } from '@/lib/api'
-import type { AgentStats, AdminSummaryStats, Agent } from '@/lib/api'
+import type { AgentStats, AdminSummaryStats, Agent, Campaign } from '@/lib/api'
 
 export default function AdminPage() {
 	const router = useRouter()
@@ -15,10 +16,14 @@ export default function AdminPage() {
 	const [agentsStats, setAgentsStats] = useState<AgentStats[]>([])
 	const [summaryStats, setSummaryStats] = useState<AdminSummaryStats | null>(null)
 	const [currentTime, setCurrentTime] = useState(new Date())
-	const [activeTab, setActiveTab] = useState<'overview' | 'performance'>('overview')
+	const [activeTab, setActiveTab] = useState<'overview' | 'performance' | 'agents' | 'campaigns'>('overview')
 	const [showAgentModal, setShowAgentModal] = useState(false)
 	const [editingAgent, setEditingAgent] = useState<Agent | null>(null)
 	const [agentSearchQuery, setAgentSearchQuery] = useState('')
+	const [campaigns, setCampaigns] = useState<Campaign[]>([])
+	const [showCampaignModal, setShowCampaignModal] = useState(false)
+	const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null)
+	const [campaignSearchQuery, setCampaignSearchQuery] = useState('')
 
 	useEffect(() => {
 		const checkAdminAuth = async () => {
@@ -32,14 +37,16 @@ export default function AdminPage() {
 			setIsAdmin(true)
 			
 			try {
-				const [agentsData, statsData, summaryData] = await Promise.all([
+				const [agentsData, statsData, summaryData, campaignsData] = await Promise.all([
 					adminAPI.listAgents(),
 					adminAPI.getAllAgentsStats(),
-					adminAPI.getSummaryStats()
+					adminAPI.getSummaryStats(),
+					adminAPI.listCampaigns()
 				])
 				setAgents(agentsData)
 				setAgentsStats(statsData)
 				setSummaryStats(summaryData)
+				setCampaigns(campaignsData)
 			} catch (error) {
 				console.error('Error loading admin data:', error)
 			} finally {
@@ -86,6 +93,54 @@ export default function AdminPage() {
 		adminAPI.getAllAgentsStats().then(setAgentsStats).catch(console.error)
 		adminAPI.getSummaryStats().then(setSummaryStats).catch(console.error)
 	}
+
+	const loadCampaigns = async () => {
+		try {
+			const campaignsData = await adminAPI.listCampaigns()
+			setCampaigns(campaignsData)
+		} catch (error) {
+			console.error('Error loading campaigns:', error)
+		}
+	}
+
+	const handleCreateCampaign = () => {
+		setEditingCampaign(null)
+		setShowCampaignModal(true)
+	}
+
+	const handleEditCampaign = (campaign: Campaign) => {
+		setEditingCampaign(campaign)
+		setShowCampaignModal(true)
+	}
+
+	const handleDeleteCampaign = async (campaignId: number, campaignName: string) => {
+		if (!confirm(`Are you sure you want to delete campaign "${campaignName}"? This action cannot be undone.`)) {
+			return
+		}
+
+		try {
+			await adminAPI.deleteCampaign(campaignId)
+			alert('Campaign deleted successfully!')
+			loadCampaigns()
+		} catch (error: any) {
+			alert(`Error: ${error.response?.data?.detail || error.message}`)
+		}
+	}
+
+	const handleCampaignModalSuccess = () => {
+		loadCampaigns()
+	}
+
+	const filteredCampaigns = campaigns.filter((campaign) => {
+		const query = campaignSearchQuery.toLowerCase().trim()
+		if (!query) return true
+		
+		return (
+			campaign.name.toLowerCase().includes(query) ||
+			campaign.code.toLowerCase().includes(query) ||
+			(campaign.description && campaign.description.toLowerCase().includes(query))
+		)
+	})
 
 	const filteredAgents = agents.filter((agent) => {
 		const query = agentSearchQuery.toLowerCase().trim()
@@ -146,6 +201,26 @@ export default function AdminPage() {
 							} whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm transition-colors duration-200`}
 						>
 							Overview
+						</button>
+						<button
+							onClick={() => setActiveTab('agents')}
+							className={`${
+								activeTab === 'agents'
+									? 'border-blue-500 text-blue-600 dark:text-blue-400'
+									: 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300 dark:text-slate-400 dark:hover:text-slate-200'
+							} whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm transition-colors duration-200`}
+						>
+							Agents
+						</button>
+						<button
+							onClick={() => setActiveTab('campaigns')}
+							className={`${
+								activeTab === 'campaigns'
+									? 'border-blue-500 text-blue-600 dark:text-blue-400'
+									: 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300 dark:text-slate-400 dark:hover:text-slate-200'
+							} whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm transition-colors duration-200`}
+						>
+							Campaigns
 						</button>
 						<button
 							onClick={() => setActiveTab('performance')}
@@ -231,8 +306,12 @@ export default function AdminPage() {
 								</div>
 							</div>
 						</div>
+					</div>
+				)}
 
-						{/* Agents Table */}
+				{/* Agents Tab */}
+				{activeTab === 'agents' && (
+					<div className="space-y-6">
 						<div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-card">
 							<div className="p-6">
 								<div className="flex items-center justify-between mb-4">
@@ -342,6 +421,124 @@ export default function AdminPage() {
 					</div>
 				)}
 
+				{/* Campaigns Tab */}
+				{activeTab === 'campaigns' && (
+					<div className="space-y-6">
+						<div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-card">
+							<div className="p-6">
+								<div className="flex items-center justify-between mb-4">
+									<h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">
+										All Campaigns ({filteredCampaigns.length}{campaignSearchQuery ? ` of ${campaigns.length}` : ''})
+									</h2>
+									<button
+										onClick={handleCreateCampaign}
+										className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm font-medium"
+									>
+										+ Create Campaign
+									</button>
+								</div>
+								{/* Search Bar */}
+								<div className="mb-4">
+									<div className="relative">
+										<input
+											type="text"
+											placeholder="Search campaigns by name, code, or description..."
+											value={campaignSearchQuery}
+											onChange={(e) => setCampaignSearchQuery(e.target.value)}
+											className="w-full px-4 py-2 pl-10 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+										/>
+										<svg
+											className="absolute left-3 top-2.5 h-5 w-5 text-slate-400"
+											fill="none"
+											stroke="currentColor"
+											viewBox="0 0 24 24"
+										>
+											<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+										</svg>
+										{campaignSearchQuery && (
+											<button
+												onClick={() => setCampaignSearchQuery('')}
+												className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+											>
+												<svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+												</svg>
+											</button>
+										)}
+									</div>
+								</div>
+								<div className="overflow-x-auto">
+									<table className="w-full">
+										<thead>
+											<tr className="border-b border-slate-200 dark:border-slate-700">
+												<th className="text-left py-3 px-4 font-semibold text-slate-700 dark:text-slate-300">Name</th>
+												<th className="text-left py-3 px-4 font-semibold text-slate-700 dark:text-slate-300">Code</th>
+												<th className="text-left py-3 px-4 font-semibold text-slate-700 dark:text-slate-300">Description</th>
+												<th className="text-left py-3 px-4 font-semibold text-slate-700 dark:text-slate-300">Status</th>
+												<th className="text-left py-3 px-4 font-semibold text-slate-700 dark:text-slate-300">Dial Method</th>
+												<th className="text-left py-3 px-4 font-semibold text-slate-700 dark:text-slate-300">Created</th>
+												<th className="text-left py-3 px-4 font-semibold text-slate-700 dark:text-slate-300">Actions</th>
+											</tr>
+										</thead>
+										<tbody>
+											{filteredCampaigns.length === 0 ? (
+												<tr>
+													<td colSpan={7} className="text-center py-8 text-slate-500 dark:text-slate-400">
+														{campaignSearchQuery ? 'No campaigns match your search' : 'No campaigns found'}
+													</td>
+												</tr>
+											) : (
+												filteredCampaigns.map((campaign) => (
+													<tr key={campaign.id} className="border-b border-slate-100 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/50">
+														<td className="py-3 px-4 text-slate-900 dark:text-slate-100 font-medium">{campaign.name}</td>
+														<td className="py-3 px-4 text-slate-900 dark:text-slate-100">
+															<span className="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded text-xs font-mono">
+																{campaign.code}
+															</span>
+														</td>
+														<td className="py-3 px-4 text-slate-900 dark:text-slate-100">{campaign.description || '-'}</td>
+														<td className="py-3 px-4">
+															<span className={`px-2 py-1 rounded text-xs font-medium ${
+																campaign.status === 'active' 
+																	? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'
+																	: campaign.status === 'paused'
+																	? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300'
+																	: 'bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-slate-300'
+															}`}>
+																{campaign.status}
+															</span>
+														</td>
+														<td className="py-3 px-4 text-slate-900 dark:text-slate-100 capitalize">{campaign.dial_method}</td>
+														<td className="py-3 px-4 text-slate-900 dark:text-slate-100 text-sm">
+															{new Date(campaign.created_at).toLocaleDateString()}
+														</td>
+														<td className="py-3 px-4">
+															<div className="flex space-x-2">
+																<button 
+																	onClick={() => handleEditCampaign(campaign)}
+																	className="text-blue-600 dark:text-blue-400 hover:underline text-sm"
+																>
+																	Edit
+																</button>
+																<button 
+																	onClick={() => handleDeleteCampaign(campaign.id, campaign.name)}
+																	className="text-red-600 dark:text-red-400 hover:underline text-sm"
+																>
+																	Delete
+																</button>
+															</div>
+														</td>
+													</tr>
+												))
+											)}
+										</tbody>
+									</table>
+								</div>
+							</div>
+						</div>
+					</div>
+				)}
+
 				{/* Performance Graphs Tab */}
 				{activeTab === 'performance' && (
 					<div className="space-y-6">
@@ -436,6 +633,16 @@ export default function AdminPage() {
 				agent={editingAgent}
 				onClose={handleAgentModalClose}
 				onSuccess={handleAgentModalSuccess}
+			/>
+		)}
+		{showCampaignModal && (
+			<CampaignAddEditModal
+				campaign={editingCampaign}
+				onClose={() => {
+					setShowCampaignModal(false)
+					setEditingCampaign(null)
+				}}
+				onSuccess={handleCampaignModalSuccess}
 			/>
 		)}
 		</>

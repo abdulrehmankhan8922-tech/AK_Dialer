@@ -7,7 +7,9 @@ from app.core.database import get_db
 from app.core.security import get_password_hash
 from app.models.agent import Agent
 from app.models.call import Call, CallDirection, CallStatus
+from app.models.campaign import Campaign, CampaignStatus, DialMethod
 from app.schemas.agent import AgentCreate, AgentUpdate
+from app.schemas.campaign import CampaignCreate, CampaignResponse, CampaignList
 from app.api.deps import get_current_agent_id
 import logging
 
@@ -314,3 +316,105 @@ async def get_summary_stats(
     except Exception as e:
         logger.error(f"Error fetching summary stats: {e}")
         raise HTTPException(status_code=500, detail="Error fetching summary statistics")
+
+
+# Campaign CRUD endpoints
+@router.get("/campaigns", response_model=CampaignList)
+async def list_all_campaigns(
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """List all campaigns (admin only)"""
+    check_admin(db, agent_id)
+    
+    campaigns = db.query(Campaign).order_by(Campaign.created_at.desc()).all()
+    return CampaignList(campaigns=[CampaignResponse.model_validate(c) for c in campaigns])
+
+
+@router.post("/campaigns", response_model=CampaignResponse)
+async def create_campaign(
+    campaign: CampaignCreate,
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Create a new campaign (admin only)"""
+    check_admin(db, agent_id)
+    
+    # Check if code already exists
+    existing = db.query(Campaign).filter(Campaign.code == campaign.code).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Campaign with code '{campaign.code}' already exists")
+    
+    db_campaign = Campaign(
+        name=campaign.name,
+        code=campaign.code,
+        description=campaign.description,
+        status=campaign.status.value,
+        dial_method=campaign.dial_method.value
+    )
+    db.add(db_campaign)
+    db.commit()
+    db.refresh(db_campaign)
+    return CampaignResponse.model_validate(db_campaign)
+
+
+@router.put("/campaigns/{campaign_id}", response_model=CampaignResponse)
+async def update_campaign(
+    campaign_id: int,
+    campaign: CampaignCreate,
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Update a campaign (admin only)"""
+    check_admin(db, agent_id)
+    
+    db_campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not db_campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    # Check if code is being changed and if new code already exists
+    if campaign.code != db_campaign.code:
+        existing = db.query(Campaign).filter(Campaign.code == campaign.code).first()
+        if existing:
+            raise HTTPException(status_code=400, detail=f"Campaign with code '{campaign.code}' already exists")
+    
+    db_campaign.name = campaign.name
+    db_campaign.code = campaign.code
+    db_campaign.description = campaign.description
+    db_campaign.status = campaign.status.value
+    db_campaign.dial_method = campaign.dial_method.value
+    
+    db.commit()
+    db.refresh(db_campaign)
+    return CampaignResponse.model_validate(db_campaign)
+
+
+@router.delete("/campaigns/{campaign_id}")
+async def delete_campaign(
+    campaign_id: int,
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Delete a campaign (admin only)"""
+    check_admin(db, agent_id)
+    
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    # Check if campaign has associated contacts or calls
+    from app.models.contact import Contact
+    from app.models.call import Call
+    
+    contact_count = db.query(Contact).filter(Contact.campaign_id == campaign_id).count()
+    call_count = db.query(Call).filter(Call.campaign_id == campaign_id).count()
+    
+    if contact_count > 0 or call_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete campaign. It has {contact_count} contacts and {call_count} calls associated with it."
+        )
+    
+    db.delete(campaign)
+    db.commit()
+    return {"success": True, "message": f"Campaign '{campaign.name}' deleted successfully"}

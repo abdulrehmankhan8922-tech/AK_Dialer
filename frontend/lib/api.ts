@@ -72,6 +72,7 @@ export interface Campaign {
   description?: string
   status: string
   dial_method: string
+  created_at: string
 }
 
 export interface Call {
@@ -183,6 +184,10 @@ export const campaignsAPI = {
     const response = await api.get<Campaign>(`/api/campaigns/${id}`)
     return response.data
   },
+  listAll: async (): Promise<Campaign[]> => {
+    const response = await api.get<{ campaigns: Campaign[] }>('/api/admin/campaigns')
+    return response.data.campaigns
+  },
 }
 
 export const callsAPI = {
@@ -270,11 +275,61 @@ export const contactsAPI = {
     const response = await api.get<Contact>(`/api/contacts/${id}`)
     return response.data
   },
+  import: async (file: File, campaign_id: number): Promise<{ success: boolean; imported: number; skipped: number; total_rows: number; errors: string[] }> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await api.post('/api/contacts/import', formData, {
+      params: { campaign_id },
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    })
+    return response.data
+  },
 }
 
 export const statsAPI = {
   getToday: async (): Promise<Stats> => {
     const response = await api.get<Stats>('/api/stats/today')
+    return response.data
+  },
+}
+
+export const asteriskAPI = {
+  getStatus: async (): Promise<{ running: boolean; version?: string }> => {
+    const response = await api.get('/api/admin/asterisk/status')
+    return response.data
+  },
+  listEndpoints: async (): Promise<any[]> => {
+    const response = await api.get('/api/admin/asterisk/endpoints')
+    return response.data
+  },
+  createEndpoint: async (endpoint: { extension: string; password: string; context?: string; callerid?: string }): Promise<any> => {
+    const response = await api.post('/api/admin/asterisk/endpoints', endpoint)
+    return response.data
+  },
+  deleteEndpoint: async (extension: string): Promise<any> => {
+    const response = await api.delete(`/api/admin/asterisk/endpoints/${extension}`)
+    return response.data
+  },
+  getDialplan: async (): Promise<{ content: string }> => {
+    const response = await api.get('/api/admin/asterisk/dialplan')
+    return response.data
+  },
+  updateDialplan: async (content: string): Promise<any> => {
+    const response = await api.post('/api/admin/asterisk/dialplan', { content })
+    return response.data
+  },
+  getTrunk: async (): Promise<{ exists: boolean; server?: string; username?: string; password?: string; port?: number }> => {
+    const response = await api.get('/api/admin/asterisk/trunk')
+    return response.data
+  },
+  updateTrunk: async (config: { server: string; username: string; password: string; port: number }): Promise<any> => {
+    const response = await api.post('/api/admin/asterisk/trunk', config)
+    return response.data
+  },
+  reload: async (module?: string): Promise<any> => {
+    const response = await api.post('/api/admin/asterisk/reload', null, { params: module ? { module } : {} })
     return response.data
   },
 }
@@ -311,6 +366,33 @@ export const adminAPI = {
   getSummaryStats: async (): Promise<AdminSummaryStats> => {
     const response = await api.get<AdminSummaryStats>('/api/admin/stats/summary')
     return response.data
+  },
+  listCampaigns: async (): Promise<Campaign[]> => {
+    const response = await api.get<{ campaigns: Campaign[] }>('/api/admin/campaigns')
+    return response.data.campaigns
+  },
+  createCampaign: async (campaignData: {
+    name: string
+    code: string
+    description?: string
+    status?: string
+    dial_method?: string
+  }): Promise<Campaign> => {
+    const response = await api.post<Campaign>('/api/admin/campaigns', campaignData)
+    return response.data
+  },
+  updateCampaign: async (campaignId: number, campaignData: {
+    name: string
+    code: string
+    description?: string
+    status?: string
+    dial_method?: string
+  }): Promise<Campaign> => {
+    const response = await api.put<Campaign>(`/api/admin/campaigns/${campaignId}`, campaignData)
+    return response.data
+  },
+  deleteCampaign: async (campaignId: number): Promise<void> => {
+    await api.delete(`/api/admin/campaigns/${campaignId}`)
   },
 }
 

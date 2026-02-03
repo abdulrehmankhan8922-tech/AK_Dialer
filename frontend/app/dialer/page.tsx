@@ -11,6 +11,7 @@ import CallTimer from '@/components/agent/CallTimer'
 import DispositionCodes from '@/components/agent/DispositionCodes'
 import CallHistory from '@/components/agent/CallHistory'
 import IncomingCallModal from '@/components/agent/IncomingCallModal'
+import WebRTCSoftphone from '@/components/agent/WebRTCSoftphone'
 import DashboardLayout from '@/components/shared/DashboardLayout'
 import type { Call, Stats, Campaign } from '@/lib/api'
 
@@ -323,6 +324,18 @@ export default function DialerPage() {
           <h2 className="text-xl font-bold mb-4 text-slate-900 dark:text-slate-100">Call History</h2>
           <CallHistory />
         </div>
+      )}
+
+      {/* WebRTC Softphone - Hidden component that manages browser-based calling */}
+      {agent && (
+        <WebRTCSoftphone
+          agentExtension={agent.phone_extension}
+          agentPassword="password123"
+          onCallStateChange={(isInCall, remoteNumber) => {
+            // Handle call state changes if needed
+            console.log('WebRTC Call State:', { isInCall, remoteNumber })
+          }}
+        />
       )}
 
     </DashboardLayout>
