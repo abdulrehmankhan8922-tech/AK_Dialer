@@ -21,8 +21,12 @@ class CallResponse(CallBase):
     contact_id: Optional[int]
     status: CallStatus
     start_time: datetime
+    ring_time: Optional[datetime] = None
+    answered_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     duration: int
+    ring_duration: int = 0
+    talk_duration: int = 0
     recording_path: Optional[str] = None
     call_unique_id: Optional[str] = None
     agent_channel: Optional[str] = None

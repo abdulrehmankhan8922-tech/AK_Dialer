@@ -9,12 +9,13 @@ import logging
 from typing import Dict, Optional, Callable, Any
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.models.call import Call, CallStatus
+from app.models.call import Call, CallStatus, CallDirection
 from app.models.agent import Agent, AgentStatus
+import uuid
 from app.services.channel_tracker import channel_tracker
 from app.services.websocket_manager import websocket_manager
 from app.services.cdr_processor import cdr_processor
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -276,27 +277,192 @@ class AMIEventListener:
         except Exception as e:
             logger.error(f"Error processing AMI event: {e}")
     
+    def _extract_extension_from_channel(self, channel: str) -> Optional[str]:
+        """Extract extension number from channel name (e.g., PJSIP/8013-00000001 -> 8013)"""
+        # Match patterns like PJSIP/8013-xxxxx or SIP/8013-xxxxx
+        match = re.search(r'(?:PJSIP|SIP)/(\d+)(?:-|$)', channel)
+        if match:
+            return match.group(1)
+        return None
+    
+    def _is_trunk_channel(self, channel: str) -> bool:
+        """Check if channel is from trunk (e.g., PJSIP/trunk-xxxxx)"""
+        return 'trunk' in channel.lower() or 'PJSIP/trunk' in channel or 'SIP/trunk' in channel
+    
+    def _is_inbound_call(self, channel: str, context: str, caller_id_num: str) -> bool:
+        """Determine if this is an inbound call based on channel, context, and caller ID"""
+        # Inbound calls come from trunk
+        if self._is_trunk_channel(channel):
+            return True
+        # Inbound calls have from-trunk context
+        if context == 'from-trunk' or 'trunk' in context.lower():
+            return True
+        # For channels that don't have clear context, check if it's not an extension channel
+        # and has a caller ID (inbound calls have caller ID from external)
+        if not self._extract_extension_from_channel(channel) and caller_id_num:
+            # If it's not an extension and has caller ID, likely inbound
+            return True
+        return False
+    
+    def _extract_phone_number_from_channel(self, channel: str, context: str, exten: str) -> Optional[str]:
+        """Extract phone number from channel or context"""
+        # For outbound calls, the number might be in exten
+        if exten and exten not in ['8013', '8014', '9000']:  # Not an internal extension
+            # Remove + prefix if present
+            return exten.lstrip('+')
+        # For inbound calls, might be in caller ID or channel
+        return None
+    
     async def _handle_newchannel(self, event: Dict[str, str]):
-        """Handle Newchannel event"""
+        """Handle Newchannel event - auto-detect and create call records"""
         channel = event.get('Channel', '')
         uniqueid = event.get('Uniqueid', '')
         context = event.get('Context', '')
         exten = event.get('Exten', '')
+        caller_id_num = event.get('CallerIDNum', '')
+        caller_id_name = event.get('CallerIDName', '')
         
-        logger.debug(f"Newchannel: {channel} (Uniqueid: {uniqueid})")
+        logger.debug(f"Newchannel: {channel} (Uniqueid: {uniqueid}, Context: {context}, Exten: {exten})")
         
-        # Check if this channel is related to a tracked call
-        # For now, we'll match by extension or context
-        
-        # Try to find call by uniqueid if it was set earlier
+        # Check if this channel is already tracked
         call_unique_id = channel_tracker.get_call_from_uniqueid(uniqueid)
+        
+        # If not tracked, try to auto-detect and create call record
+        if not call_unique_id:
+            db = SessionLocal()
+            try:
+                agent = None
+                direction = None
+                phone_number = None
+                
+                # Detect inbound calls (from trunk) - check multiple indicators
+                is_inbound = self._is_inbound_call(channel, context, caller_id_num)
+                
+                if is_inbound:
+                    direction = CallDirection.INBOUND
+                    # For inbound, phone number is usually in CallerIDNum (caller's number)
+                    phone_number = caller_id_num or exten
+                    # Find agent by extension that will receive the call (from dialplan routing)
+                    # Default to 8013 for now, but we'll update when we see the Dial event
+                    agent = db.query(Agent).filter(Agent.phone_extension == '8013').first()
+                    if not agent:
+                        # Try 8014 as fallback
+                        agent = db.query(Agent).filter(Agent.phone_extension == '8014').first()
+                
+                # Detect outbound calls (from internal extensions)
+                # Only if NOT already identified as inbound and has extension in channel
+                elif context == 'from-internal' or 'internal' in context.lower():
+                    # Check if this might be an extension channel for an inbound call
+                    # (when Asterisk dials the extension, it creates a new channel)
+                    extension = self._extract_extension_from_channel(channel)
+                    
+                    # If this is an extension channel but we already have an inbound call being dialed,
+                    # don't create a new call - it's part of the inbound call flow
+                    if extension:
+                        # Check if there's an active inbound call that might be dialing this extension
+                        # We'll handle this in DialBegin event instead
+                        # For now, only create outbound if we're sure it's outbound
+                        # Outbound calls have the dialed number in exten, not an extension number
+                        if exten and exten not in ['8013', '8014', '9000'] and not exten.startswith('+'):
+                            direction = CallDirection.OUTBOUND
+                            # Find agent by extension
+                            agent = db.query(Agent).filter(Agent.phone_extension == extension).first()
+                            # Phone number is the dialed number
+                            phone_number = exten.lstrip('+')
+                        else:
+                            # This might be an extension channel for an inbound call, skip creating call here
+                            # The DialBegin event will handle associating it with the inbound call
+                            direction = None
+                            agent = None
+                            phone_number = None
+                    else:
+                        direction = CallDirection.OUTBOUND
+                        # Extract extension from channel if possible
+                        extension = self._extract_extension_from_channel(channel)
+                        if extension:
+                            agent = db.query(Agent).filter(Agent.phone_extension == extension).first()
+                        # Phone number is usually in exten (the dialed number)
+                        phone_number = self._extract_phone_number_from_channel(channel, context, exten)
+                        if not phone_number and exten:
+                            phone_number = exten.lstrip('+')
+                
+                # Only create call record if we have enough info
+                if direction and phone_number and agent:
+                    call_unique_id = str(uuid.uuid4())
+                    call = Call(
+                        agent_id=agent.id,
+                        phone_number=phone_number,
+                        direction=direction.value,
+                        status=CallStatus.DIALING.value,
+                        call_unique_id=call_unique_id,
+                        start_time=datetime.now(timezone.utc)
+                    )
+                    db.add(call)
+                    db.commit()
+                    db.refresh(call)
+                    
+                    # Register in channel tracker
+                    channel_tracker.register_call(call_unique_id)
+                    
+                    # Determine if this is agent or customer channel
+                    if direction == CallDirection.INBOUND:
+                        # Inbound: trunk channel is customer, extension channel is agent
+                        call.customer_channel = channel
+                        channel_tracker.set_customer_channel(call_unique_id, channel, uniqueid)
+                    else:
+                        # Outbound: extension channel is agent
+                        call.agent_channel = channel
+                        channel_tracker.set_agent_channel(call_unique_id, channel, uniqueid)
+                    
+                    db.commit()
+                    db.refresh(call)
+                    
+                    # Send WebSocket update
+                    await websocket_manager.send_call_update(agent.id, {
+                        "call_id": call.id,
+                        "status": call.status,
+                        "phone_number": call.phone_number,
+                        "direction": call.direction
+                    })
+                    
+                    # Send incoming call notification for inbound calls
+                    if direction == CallDirection.INBOUND:
+                        await websocket_manager.send_personal_message({
+                            "type": "incoming_call",
+                            "data": {
+                                "call_id": call.id,
+                                "phone_number": call.phone_number,
+                                "direction": call.direction
+                            }
+                        }, agent.id)
+                    
+                    logger.info(f"Auto-created call record: {call_unique_id} for {direction.value} call from {phone_number} to agent {agent.phone_extension}")
+                
+            except Exception as e:
+                logger.error(f"Error auto-creating call record: {e}")
+                db.rollback()
+            finally:
+                db.close()
+        
+        # If call is already tracked, just update channel mapping
         if call_unique_id:
-            # Determine if this is agent or customer channel
-            # Agent channels usually come from internal context
-            if 'internal' in context.lower() or exten:
-                channel_tracker.set_agent_channel(call_unique_id, channel, uniqueid)
-            else:
-                channel_tracker.set_customer_channel(call_unique_id, channel, uniqueid)
+            db = SessionLocal()
+            try:
+                call = db.query(Call).filter(Call.call_unique_id == call_unique_id).first()
+                if call:
+                    # Determine if this is agent or customer channel
+                    if 'internal' in context.lower() or self._extract_extension_from_channel(channel):
+                        call.agent_channel = channel
+                        channel_tracker.set_agent_channel(call_unique_id, channel, uniqueid)
+                    else:
+                        call.customer_channel = channel
+                        channel_tracker.set_customer_channel(call_unique_id, channel, uniqueid)
+                    db.commit()
+            except Exception as e:
+                logger.error(f"Error updating channel in database: {e}")
+                db.rollback()
+            finally:
+                db.close()
     
     async def _handle_newstate(self, event: Dict[str, str]):
         """Handle Newstate event (channel state changes)"""
@@ -305,6 +471,29 @@ class AMIEventListener:
         uniqueid = event.get('Uniqueid', '')
         
         call_unique_id = channel_tracker.get_call_from_channel(channel) or channel_tracker.get_call_from_uniqueid(uniqueid)
+        
+        # If not tracked, try to auto-detect (similar to Newchannel)
+        if not call_unique_id:
+            # Try to find existing call by uniqueid in database
+            db = SessionLocal()
+            try:
+                call = db.query(Call).filter(Call.customer_channel == channel).first()
+                if not call:
+                    call = db.query(Call).filter(Call.agent_channel == channel).first()
+                if call and call.call_unique_id:
+                    call_unique_id = call.call_unique_id
+                    channel_tracker.register_call(call_unique_id)
+                    # Update channel mapping
+                    if 'PJSIP' in channel or 'SIP' in channel:
+                        extension = self._extract_extension_from_channel(channel)
+                        if extension:
+                            channel_tracker.set_agent_channel(call_unique_id, channel, uniqueid)
+                        else:
+                            channel_tracker.set_customer_channel(call_unique_id, channel, uniqueid)
+            except Exception as e:
+                logger.debug(f"Could not find call for channel {channel}: {e}")
+            finally:
+                db.close()
         
         if not call_unique_id:
             return
@@ -329,6 +518,18 @@ class AMIEventListener:
                 old_status = call.status
                 call.status = new_status.value
                 
+                # Track ring time (when call starts ringing)
+                if new_status == CallStatus.RINGING and not call.ring_time:
+                    call.ring_time = datetime.now(timezone.utc)
+                
+                # Track answered time (when call is connected/answered)
+                if new_status == CallStatus.CONNECTED and not call.answered_time:
+                    call.answered_time = datetime.now(timezone.utc)
+                    # Calculate ring duration
+                    if call.ring_time:
+                        ring_duration = (call.answered_time - call.ring_time).total_seconds()
+                        call.ring_duration = int(ring_duration)
+                
                 # Update agent status
                 if call.agent_id:
                     agent = db.query(Agent).filter(Agent.id == call.agent_id).first()
@@ -346,10 +547,11 @@ class AMIEventListener:
                         "call_id": call.id,
                         "status": call.status,
                         "phone_number": call.phone_number,
+                        "direction": call.direction,
                         "old_status": old_status
                     })
-                
-                logger.info(f"Call {call_unique_id} status changed: {old_status} -> {call.status}")
+                    
+                    logger.info(f"Call {call_unique_id} status changed: {old_status} -> {call.status}")
         
         except Exception as e:
             logger.error(f"Error handling Newstate event: {e}")
@@ -380,11 +582,21 @@ class AMIEventListener:
             # Update call status
             if call.status not in [CallStatus.ENDED.value, CallStatus.FAILED.value]:
                 call.status = CallStatus.ENDED.value
-                call.end_time = datetime.utcnow()
+                call.end_time = datetime.now(timezone.utc)
                 
+                # Calculate durations
                 if call.start_time:
                     duration = (call.end_time - call.start_time).total_seconds()
                     call.duration = int(duration)
+                
+                # Calculate talk duration (answered to end)
+                if call.answered_time:
+                    talk_duration = (call.end_time - call.answered_time).total_seconds()
+                    call.talk_duration = int(talk_duration)
+                elif call.ring_time and not call.answered_time:
+                    # Call ended without being answered - ring duration is from ring to end
+                    ring_duration = (call.end_time - call.ring_time).total_seconds()
+                    call.ring_duration = int(ring_duration)
                 
                 # Map cause codes to call status
                 cause_code = int(cause) if cause.isdigit() else 0
@@ -411,6 +623,7 @@ class AMIEventListener:
                         "call_id": call.id,
                         "status": call.status,
                         "phone_number": call.phone_number,
+                        "direction": call.direction,
                         "duration": call.duration
                     })
                     await websocket_manager.send_agent_status_update(call.agent_id, "available")
@@ -447,13 +660,21 @@ class AMIEventListener:
                 call = db.query(Call).filter(Call.call_unique_id == call_unique_id).first()
                 if call and call.status != CallStatus.CONNECTED.value:
                     call.status = CallStatus.CONNECTED.value
+                    # Track answered time when call is bridged
+                    if not call.answered_time:
+                        call.answered_time = datetime.now(timezone.utc)
+                        # Calculate ring duration
+                        if call.ring_time:
+                            ring_duration = (call.answered_time - call.ring_time).total_seconds()
+                            call.ring_duration = int(ring_duration)
                     db.commit()
                     
                     if call.agent_id:
                         await websocket_manager.send_call_update(call.agent_id, {
                             "call_id": call.id,
                             "status": call.status,
-                            "phone_number": call.phone_number
+                            "phone_number": call.phone_number,
+                            "direction": call.direction
                         })
             except Exception as e:
                 logger.error(f"Error handling Bridge event: {e}")
@@ -477,14 +698,107 @@ class AMIEventListener:
         pass
     
     async def _handle_dial_begin(self, event: Dict[str, str]):
-        """Handle DialBegin event"""
-        # Dial attempt started
+        """Handle DialBegin event - helps track inbound calls to extensions"""
         channel = event.get('Channel', '')
         destination = event.get('Destination', '')
+        dial_string = event.get('DialString', '')
         
+        logger.debug(f"Dial begin: {channel} -> {destination} (DialString: {dial_string})")
+        
+        # Extract extension from destination (e.g., PJSIP/8013-xxxxx -> 8013)
+        extension = self._extract_extension_from_channel(destination)
+        
+        # For inbound calls, find the call by customer channel (the trunk channel)
         call_unique_id = channel_tracker.get_call_from_channel(channel)
-        if call_unique_id:
-            logger.debug(f"Dial begin: {channel} -> {destination}")
+        
+        # If not found by channel, try to find by uniqueid or check if this is an inbound call
+        if not call_unique_id:
+            # Check if channel is a trunk channel (inbound call)
+            if self._is_trunk_channel(channel):
+                # Try to find existing inbound call by customer channel
+                db = SessionLocal()
+                try:
+                    call = db.query(Call).filter(
+                        Call.customer_channel == channel,
+                        Call.direction == CallDirection.INBOUND.value
+                    ).order_by(Call.start_time.desc()).first()
+                    if call and call.call_unique_id:
+                        call_unique_id = call.call_unique_id
+                        channel_tracker.register_call(call_unique_id)
+                        channel_tracker.set_customer_channel(call_unique_id, channel, None)
+                except Exception as e:
+                    logger.error(f"Error finding inbound call: {e}")
+                finally:
+                    db.close()
+        
+        if call_unique_id and extension:
+            db = SessionLocal()
+            try:
+                call = db.query(Call).filter(Call.call_unique_id == call_unique_id).first()
+                if call:
+                    # Update direction to INBOUND if it was incorrectly set
+                    if call.direction != CallDirection.INBOUND.value:
+                        call.direction = CallDirection.INBOUND.value
+                        logger.info(f"Corrected call direction to INBOUND for {call_unique_id}")
+                    
+                    # Find agent by extension
+                    agent = db.query(Agent).filter(Agent.phone_extension == extension).first()
+                    if agent:
+                        # Update call with correct agent if different
+                        if call.agent_id != agent.id:
+                            call.agent_id = agent.id
+                            logger.info(f"Updated inbound call {call_unique_id} to agent {extension}")
+                        
+                        # Update status to RINGING if not already
+                        if call.status not in [CallStatus.RINGING.value, CallStatus.CONNECTED.value, CallStatus.ANSWERED.value]:
+                            call.status = CallStatus.RINGING.value
+                            if not call.ring_time:
+                                call.ring_time = datetime.now(timezone.utc)
+                        
+                        db.commit()
+                        
+                        # Send WebSocket update with proper direction
+                        await websocket_manager.send_call_update(agent.id, {
+                            "call_id": call.id,
+                            "status": call.status,
+                            "phone_number": call.phone_number,
+                            "direction": CallDirection.INBOUND.value
+                        })
+                        
+                        # Send incoming call notification
+                        await websocket_manager.send_personal_message({
+                            "type": "incoming_call",
+                            "data": {
+                                "call_id": call.id,
+                                "phone_number": call.phone_number,
+                                "direction": CallDirection.INBOUND.value,
+                                "status": call.status
+                            }
+                        }, agent.id)
+                        
+                        logger.info(f"Inbound call {call_unique_id} ringing agent {extension}")
+            except Exception as e:
+                logger.error(f"Error handling DialBegin: {e}")
+                db.rollback()
+            finally:
+                db.close()
+        
+        # Also track the destination channel (agent channel)
+        if call_unique_id and destination:
+            # Destination is usually the agent channel for inbound calls
+            if extension:
+                db = SessionLocal()
+                try:
+                    call = db.query(Call).filter(Call.call_unique_id == call_unique_id).first()
+                    if call:
+                        call.agent_channel = destination
+                        db.commit()
+                except Exception as e:
+                    logger.error(f"Error updating agent channel: {e}")
+                    db.rollback()
+                finally:
+                    db.close()
+                channel_tracker.set_agent_channel(call_unique_id, destination, None)
     
     async def _handle_dial_end(self, event: Dict[str, str]):
         """Handle DialEnd event"""
@@ -510,7 +824,8 @@ class AMIEventListener:
                             await websocket_manager.send_call_update(call.agent_id, {
                                 "call_id": call.id,
                                 "status": call.status,
-                                "phone_number": call.phone_number
+                                "phone_number": call.phone_number,
+                                "direction": call.direction
                             })
                 except Exception as e:
                     logger.error(f"Error handling DialEnd event: {e}")

@@ -6,7 +6,7 @@ from app.core.security import verify_password, create_access_token, decode_acces
 from app.schemas.auth import LoginRequest, LoginResponse
 from app.models.agent import Agent, AgentSession, AgentStatus
 from app.models.campaign import Campaign
-from app.api.deps import security
+from app.api.deps import security, get_current_agent_id
 import uuid
 from datetime import timedelta
 
@@ -115,14 +115,9 @@ def login(login_data: LoginRequest, db: Session = Depends(get_db)):
 @router.post("/logout")
 async def logout(
     db: Session = Depends(get_db),
-    credentials: HTTPAuthorizationCredentials = Depends(security)
+    agent_id: int = Depends(get_current_agent_id)
 ):
     """Agent logout"""
-    token = credentials.credentials
-    payload = decode_access_token(token)
-    if not payload:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    agent_id = payload.get("agent_id")
     
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if agent:

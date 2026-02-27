@@ -10,12 +10,6 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [agent, setAgent] = useState<any>(null)
   const [currentTime, setCurrentTime] = useState(new Date())
-  const [notifications, setNotifications] = useState({
-    email: true,
-    sound: true,
-    popup: false,
-  })
-  const [autoAnswer, setAutoAnswer] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>('dark')
 
   useEffect(() => {
@@ -63,11 +57,7 @@ export default function SettingsPage() {
     setTheme(newTheme)
     localStorage.setItem('theme', newTheme)
     document.documentElement.classList.toggle('dark', newTheme === 'dark')
-  }
-
-  const handleSave = async () => {
-    // Save settings (implement backend endpoint for this)
-    alert('Settings saved successfully!')
+    // Theme is saved automatically, no need for save button
   }
 
   if (loading) {
@@ -77,8 +67,6 @@ export default function SettingsPage() {
       </div>
     )
   }
-
-  const agentData = JSON.parse(localStorage.getItem('agent_data') || '{}')
 
   return (
     <DashboardLayout
@@ -133,87 +121,27 @@ export default function SettingsPage() {
               <div className="flex space-x-2">
                 <button
                   onClick={() => handleThemeChange('light')}
-                  className={`px-4 py-2 rounded-md font-medium ${
+                  className={`px-4 py-2 rounded-md font-medium transition-colors ${
                     theme === 'light'
                       ? 'bg-blue-600 text-white'
-                      : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
+                      : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600'
                   }`}
                 >
                   Light
                 </button>
                 <button
                   onClick={() => handleThemeChange('dark')}
-                  className={`px-4 py-2 rounded-md font-medium ${
+                  className={`px-4 py-2 rounded-md font-medium transition-colors ${
                     theme === 'dark'
                       ? 'bg-blue-600 text-white'
-                      : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
+                      : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600'
                   }`}
                 >
                   Dark
                 </button>
               </div>
             </div>
-
-            <div className="flex items-center justify-between py-3 border-t border-slate-200 dark:border-slate-700">
-              <div>
-                <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Auto-Answer Calls</label>
-                <p className="text-xs text-slate-500 dark:text-slate-400">Automatically answer incoming calls</p>
-              </div>
-              <button
-                onClick={() => setAutoAnswer(!autoAnswer)}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  autoAnswer ? 'bg-blue-600' : 'bg-slate-300 dark:bg-slate-600'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    autoAnswer ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
-            </div>
           </div>
-        </div>
-
-        {/* Notifications */}
-        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-6 shadow-card">
-          <h2 className="text-xl font-bold mb-4 text-slate-900 dark:text-slate-100">Notifications</h2>
-          <div className="space-y-4">
-            {Object.entries(notifications).map(([key, value]) => (
-              <div key={key} className="flex items-center justify-between py-3 border-b border-slate-200 dark:border-slate-700 last:border-0">
-                <div>
-                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300 capitalize">{key} Notifications</label>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    {key === 'email' && 'Receive email notifications'}
-                    {key === 'sound' && 'Play sound alerts'}
-                    {key === 'popup' && 'Show popup notifications'}
-                  </p>
-                </div>
-                <button
-                  onClick={() => setNotifications({ ...notifications, [key]: !value })}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    value ? 'bg-blue-600' : 'bg-slate-300 dark:bg-slate-600'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      value ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Save Button */}
-        <div className="flex justify-end">
-          <button
-            onClick={handleSave}
-            className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-semibold"
-          >
-            Save Settings
-          </button>
         </div>
       </div>
     </DashboardLayout>

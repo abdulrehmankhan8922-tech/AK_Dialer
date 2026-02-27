@@ -27,6 +27,19 @@ export default function DialerPage() {
   const [currentTime, setCurrentTime] = useState(new Date())
   const [activeTab, setActiveTab] = useState<'dialer' | 'history'>('dialer')
 
+  // Helper function to check if a call is active
+  const isCallActive = (call: Call | null): boolean => {
+    if (!call) return false
+    const endedStatuses = ['ended', 'failed', 'busy', 'no_answer', 'transferred', 'parked']
+    if (endedStatuses.includes(call.status)) return false
+    if (call.end_time) {
+      const endTime = new Date(call.end_time).getTime()
+      const now = Date.now()
+      if (now - endTime > 1000) return false // Ended more than 1 second ago
+    }
+    return true
+  }
+
   useEffect(() => {
     const initializeDashboard = async () => {
       // Check authentication
@@ -86,6 +99,12 @@ export default function DialerPage() {
         // Load current call
         loadCurrentCall().catch(console.error)
 
+        // Refresh current call periodically (every 2 seconds)
+        // This ensures we catch any status changes even if WebSocket misses them
+        const callInterval = setInterval(() => {
+          loadCurrentCall().catch(console.error)
+        }, 2000)
+
         // Refresh stats periodically
         const statsInterval = setInterval(() => {
           loadStats().catch(console.error)
@@ -93,6 +112,7 @@ export default function DialerPage() {
 
         return () => {
           clearInterval(timeInterval)
+          clearInterval(callInterval)
           clearInterval(statsInterval)
           wsManager.off('call_update', handleCallUpdate)
           wsManager.off('incoming_call', handleIncomingCall)
@@ -114,6 +134,27 @@ export default function DialerPage() {
     initializeDashboard()
   }, [router])
 
+  // Safety check: Clear ended calls periodically
+  useEffect(() => {
+    if (!currentCall) return
+
+    const checkCallStatus = () => {
+      // Use the helper function to check if call is still active
+      if (!isCallActive(currentCall)) {
+        setCurrentCall(null)
+        loadStats() // Refresh stats when call ends
+      }
+    }
+
+    // Check immediately
+    checkCallStatus()
+
+    // Check every second
+    const interval = setInterval(checkCallStatus, 1000)
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentCall])
+
   const loadStats = async () => {
     try {
       const data = await statsAPI.getToday()
@@ -134,14 +175,51 @@ export default function DialerPage() {
   const loadCurrentCall = async () => {
     try {
       const call = await callsAPI.getCurrent()
+      // Explicitly clear call if null or if call status is ended/failed
+      if (!call || call.status === 'ended' || call.status === 'failed' || call.status === 'busy' || call.status === 'no_answer') {
+        setCurrentCall(null)
+        return
+      }
+      
+      // Additional safety check: if call has end_time, it's ended
+      if (call.end_time) {
+        const endTime = new Date(call.end_time).getTime()
+        const now = Date.now()
+        // If call ended more than 5 seconds ago, clear it
+        if (now - endTime > 5000) {
+          setCurrentCall(null)
+          return
+        }
+      }
+      
       setCurrentCall(call)
     } catch (error) {
       console.error('Error loading current call:', error)
+      // Clear call on error to prevent stuck state
+      setCurrentCall(null)
     }
   }
 
   const handleCallUpdate = (data: any) => {
+    // If status is ended/failed/busy/no_answer, clear the call immediately
+    const endedStatuses = ['ended', 'failed', 'busy', 'no_answer', 'transferred', 'parked']
+    if (data.status && endedStatuses.includes(data.status)) {
+      setCurrentCall(null)
+      loadStats() // Refresh stats
+      return
+    }
+    
+    // If we have a current call and this update is for a different call, check if current call ended
+    if (currentCall && data.call_id && currentCall.id !== data.call_id) {
+      // This might be a new call, but first check if current call is still active
+      loadCurrentCall()
+      return
+    }
+    
     if (data.call_id) {
+      loadCurrentCall()
+    } else {
+      // If no call_id but update received, refresh to check current state
       loadCurrentCall()
     }
   }
@@ -155,16 +233,31 @@ export default function DialerPage() {
   }
 
   const handleIncomingCall = async (data: any) => {
-    if (data.call_id && data.direction === 'inbound') {
+    if (data.call_id && (data.direction === 'inbound' || data.data?.direction === 'inbound')) {
       try {
-        // Fetch the full call details
+        // First try to get current call (might be the incoming call)
+        const currentCall = await callsAPI.getCurrent()
+        if (currentCall && currentCall.id === data.call_id && currentCall.direction === 'inbound') {
+          setIncomingCall(currentCall)
+          return
+        }
+        // Otherwise fetch from history
         const calls = await callsAPI.getHistory('inbound')
         const call = calls.find(c => c.id === data.call_id)
-        if (call && call.status === 'ringing') {
+        if (call && (call.status === 'ringing' || call.status === 'dialing')) {
           setIncomingCall(call)
         }
       } catch (error) {
         console.error('Error loading incoming call:', error)
+        // Fallback: try to load current call
+        try {
+          const currentCall = await callsAPI.getCurrent()
+          if (currentCall && currentCall.direction === 'inbound') {
+            setIncomingCall(currentCall)
+          }
+        } catch (e) {
+          console.error('Error loading current call as incoming:', e)
+        }
       }
     }
   }
@@ -222,10 +315,10 @@ export default function DialerPage() {
                 </>
               )}
             </div>
-            {currentCall && <CallTimer call={currentCall} />}
+            {currentCall && isCallActive(currentCall) && <CallTimer call={currentCall} />}
           </div>
           <div>
-            {currentCall ? (
+            {currentCall && isCallActive(currentCall) ? (
               <span className="inline-flex items-center px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-bold shadow-lg">
                 <span className="w-2 h-2 bg-white rounded-full animate-pulse mr-2"></span>
                 LIVE CALL - {currentCall.phone_number}

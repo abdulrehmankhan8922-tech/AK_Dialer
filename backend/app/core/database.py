@@ -12,10 +12,11 @@ if settings.DATABASE_URL.startswith('postgresql'):
     engine = create_engine(
         settings.DATABASE_URL,
         poolclass=QueuePool,
-        pool_size=10,  # Number of connections to maintain
-        max_overflow=20,  # Maximum overflow connections
+        pool_size=20,  # Number of connections to maintain (increased)
+        max_overflow=40,  # Maximum overflow connections (increased)
         pool_pre_ping=True,  # Verify connections before using
-        pool_recycle=3600,  # Recycle connections after 1 hour
+        pool_recycle=1800,  # Recycle connections after 30 minutes (reduced)
+        pool_timeout=30,  # Timeout for getting connection from pool
         echo=False  # Set to True for SQL query logging in development
     )
 else:
@@ -41,8 +42,9 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+        db.commit()  # Commit successful transactions
     except Exception as e:
-        logger.error(f"Database session error: {e}")
+        logger.error(f"Database session error: {e}", exc_info=True)
         db.rollback()
         raise
     finally:

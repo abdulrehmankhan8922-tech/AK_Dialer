@@ -17,6 +17,7 @@ export default function ContactsPage() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [editingContact, setEditingContact] = useState<Contact | null>(null)
   const [importResult, setImportResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null)
   const [currentTime, setCurrentTime] = useState(new Date())
 
@@ -149,10 +150,14 @@ export default function ContactsPage() {
     <DashboardLayout
       timeString={formatDateTime(currentTime)}
     >
-      {showAddModal && (
+      {(showAddModal || editingContact) && (
         <ContactAddModal
           campaigns={campaigns}
-          onClose={() => setShowAddModal(false)}
+          contact={editingContact}
+          onClose={() => {
+            setShowAddModal(false)
+            setEditingContact(null)
+          }}
           onSuccess={handleContactCreated}
         />
       )}
@@ -284,8 +289,11 @@ export default function ContactsPage() {
                           </span>
                         </td>
                         <td className="py-3 px-4">
-                          <button className="text-blue-600 dark:text-blue-400 hover:underline text-sm">
-                            View
+                          <button 
+                            onClick={() => setEditingContact(contact)}
+                            className="text-blue-600 dark:text-blue-400 hover:underline text-sm"
+                          >
+                            Edit
                           </button>
                         </td>
                       </tr>

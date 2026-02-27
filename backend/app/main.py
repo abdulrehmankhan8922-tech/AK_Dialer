@@ -86,21 +86,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Security
-security = HTTPBearer()
-
-
-# Dependency function for routes that need agent_id
-async def get_current_agent_id(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)) -> int:
-    """Dependency to extract agent_id from JWT token"""
-    token = credentials.credentials
-    payload = decode_access_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    agent_id = payload.get("agent_id")
-    if agent_id is None:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return agent_id
+# Security - use the one from deps.py to avoid duplication
+from app.api.deps import get_current_agent_id
 
 
 # Include routers

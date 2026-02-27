@@ -53,10 +53,23 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
     setLoading(true)
     try {
       await callsAPI.hangup(currentCall.id)
+      // Immediately trigger update - the backend should mark call as ended
+      // This will cause loadCurrentCall to return null and clear the UI
       onCallUpdate()
       onStatsUpdate()
+      
+      // Force clear after a short delay as backup
+      setTimeout(() => {
+        onCallUpdate()
+      }, 500)
     } catch (error) {
       console.error('Error hanging up:', error)
+      // Even on error, try to refresh to clear stuck state
+      onCallUpdate()
+      // Force clear after error
+      setTimeout(() => {
+        onCallUpdate()
+      }, 500)
     } finally {
       setLoading(false)
     }

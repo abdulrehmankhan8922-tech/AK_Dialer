@@ -34,11 +34,15 @@ class Call(Base):
     direction = Column(String, default=CallDirection.OUTBOUND.value)
     status = Column(String, default=CallStatus.DIALING.value)
     start_time = Column(DateTime(timezone=True), server_default=func.now())
+    ring_time = Column(DateTime(timezone=True), nullable=True)  # When call started ringing
+    answered_time = Column(DateTime(timezone=True), nullable=True)  # When call was answered
     end_time = Column(DateTime(timezone=True), nullable=True)
-    duration = Column(Integer, default=0)  # seconds
+    duration = Column(Integer, default=0)  # Total call duration (seconds)
+    ring_duration = Column(Integer, default=0)  # Ringing duration (seconds)
+    talk_duration = Column(Integer, default=0)  # Actual talk time (answered to end, seconds)
     recording_path = Column(String, nullable=True)
     call_unique_id = Column(String, unique=True, index=True, nullable=True)  # Unique call ID
-    freeswitch_channel = Column(String, nullable=True)  # Legacy field name, now stores primary channel
+    freeswitch_channel = Column(String, nullable=True)  # Legacy field name, stores Asterisk channel
     agent_channel = Column(String, nullable=True)  # Agent's Asterisk channel
     customer_channel = Column(String, nullable=True)  # Customer's Asterisk channel
     bridge_unique_id = Column(String, nullable=True)  # Bridge unique ID when call is bridged

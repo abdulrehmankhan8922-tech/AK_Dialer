@@ -40,8 +40,12 @@ export interface Call {
   direction: 'inbound' | 'outbound'
   status: string
   start_time: string
+  ring_time?: string
+  answered_time?: string
   end_time?: string
   duration: number
+  ring_duration: number
+  talk_duration: number
   call_unique_id?: string
 }
 

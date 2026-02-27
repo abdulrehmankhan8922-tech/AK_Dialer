@@ -75,9 +75,11 @@ async def dial(
         
         # Send WebSocket update (non-blocking)
         try:
+            # Handle both enum and string status
+            status_value = call.status.value if hasattr(call.status, 'value') else call.status
             await websocket_manager.send_call_update(agent_id, {
                 "call_id": call.id,
-                "status": call.status.value,
+                "status": status_value,
                 "phone_number": call.phone_number
             })
         except Exception as ws_error:
@@ -112,6 +114,10 @@ async def hangup(call_id: int, db: Session = Depends(get_db), agent_id: int = De
             if call.start_time:
                 duration = (call.end_time - call.start_time).total_seconds()
                 call.duration = int(duration)
+            # Calculate talk duration (answered to end)
+            if call.answered_time:
+                talk_duration = (call.end_time - call.answered_time).total_seconds()
+                call.talk_duration = int(talk_duration)
             
             # Update agent status
             agent = db.query(Agent).filter(Agent.id == agent_id).first()
@@ -479,6 +485,14 @@ async def answer_inbound_call(call_id: int, db: Session = Depends(get_db), agent
         # Update call status to answered and assign to agent
         call.status = CallStatus.ANSWERED.value
         call.agent_id = agent_id
+        
+        # Track answered time and calculate ring duration
+        if not call.answered_time:
+            call.answered_time = datetime.now(timezone.utc)
+            if call.ring_time:
+                ring_duration = (call.answered_time - call.ring_time).total_seconds()
+                call.ring_duration = int(ring_duration)
+        
         db.commit()
         
         # Send WebSocket update

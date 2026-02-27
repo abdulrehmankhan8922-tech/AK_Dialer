@@ -102,7 +102,21 @@ export default function CallHistory() {
               </div>
               <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
                 <span>{call.direction === 'outbound' ? 'Outbound' : 'Inbound'}</span>
-                <span>Duration: {formatDuration(call.duration || 0)}</span>
+                <div className="flex items-center space-x-3">
+                  {call.ring_duration > 0 && (
+                    <span className="text-yellow-600 dark:text-yellow-400">
+                      Ring: {formatDuration(call.ring_duration)}
+                    </span>
+                  )}
+                  {call.talk_duration > 0 && (
+                    <span className="text-green-600 dark:text-green-400">
+                      Talk: {formatDuration(call.talk_duration)}
+                    </span>
+                  )}
+                  {call.duration > 0 && (
+                    <span>Total: {formatDuration(call.duration)}</span>
+                  )}
+                </div>
               </div>
             </div>
           ))

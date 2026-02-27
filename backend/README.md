@@ -34,16 +34,16 @@ Once running, visit:
 - Swagger UI: http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
 
-## FreeSWITCH Setup
+## Asterisk Setup
 
 ### For Development (Mock Mode):
 Set `USE_MOCK_DIALER=true` in `.env` - calls will be simulated.
 
 ### For Production (Real Calls):
-1. Install FreeSWITCH
-2. Configure SIP trunk
+1. Install Asterisk
+2. Configure SIP trunk (PJSIP)
 3. Set `USE_MOCK_DIALER=false` in `.env`
-4. Configure FreeSWITCH connection settings
+4. Configure Asterisk AMI connection settings
 
 ## Default Agent
 

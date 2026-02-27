@@ -1,16 +1,18 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { contactsAPI } from '@/lib/api'
-import type { Campaign } from '@/lib/api'
+import type { Campaign, Contact } from '@/lib/api'
 
 interface ContactAddModalProps {
   campaigns: Campaign[]
+  contact?: Contact | null
   onClose: () => void
   onSuccess: () => void
 }
 
-export default function ContactAddModal({ campaigns, onClose, onSuccess }: ContactAddModalProps) {
+export default function ContactAddModal({ campaigns, contact, onClose, onSuccess }: ContactAddModalProps) {
+  const isEditMode = !!contact
   const [formData, setFormData] = useState({
     campaign_id: campaigns.length > 0 ? campaigns[0].id : 0,
     name: '',
@@ -25,6 +27,28 @@ export default function ContactAddModal({ campaigns, onClose, onSuccess }: Conta
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (contact) {
+      // Ensure gender is one of the valid values
+      const validGender = (contact.gender === 'M' || contact.gender === 'F' || contact.gender === 'U') 
+        ? contact.gender 
+        : 'U' as 'M' | 'F' | 'U'
+      
+      setFormData({
+        campaign_id: contact.campaign_id,
+        name: contact.name || '',
+        phone: contact.phone || '',
+        email: contact.email || '',
+        address: contact.address || '',
+        city: contact.city || '',
+        occupation: contact.occupation || '',
+        gender: validGender,
+        whatsapp: contact.whatsapp || '',
+        comments: contact.comments || ''
+      })
+    }
+  }, [contact])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -43,11 +67,15 @@ export default function ContactAddModal({ campaigns, onClose, onSuccess }: Conta
     setError('')
 
     try {
-      await contactsAPI.create(formData)
+      if (isEditMode && contact) {
+        await contactsAPI.update(contact.id, formData)
+      } else {
+        await contactsAPI.create(formData)
+      }
       onSuccess()
       onClose()
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to create contact')
+      setError(err.response?.data?.detail || `Failed to ${isEditMode ? 'update' : 'create'} contact`)
     } finally {
       setLoading(false)
     }
@@ -67,7 +95,9 @@ export default function ContactAddModal({ campaigns, onClose, onSuccess }: Conta
         className="bg-white dark:bg-slate-800 rounded-lg p-6 max-w-2xl w-full mx-4 shadow-xl max-h-[90vh] overflow-y-auto" 
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-xl font-bold mb-4 text-slate-900 dark:text-slate-100">Add New Contact</h2>
+        <h2 className="text-xl font-bold mb-4 text-slate-900 dark:text-slate-100">
+          {isEditMode ? 'Edit Contact' : 'Add New Contact'}
+        </h2>
         
         <form onSubmit={handleSubmit} className="space-y-4">
           {/* Campaign - Required */}
@@ -241,7 +271,7 @@ export default function ContactAddModal({ campaigns, onClose, onSuccess }: Conta
               disabled={loading}
               className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? 'Creating...' : 'Create Contact'}
+              {loading ? (isEditMode ? 'Updating...' : 'Creating...') : (isEditMode ? 'Update Contact' : 'Create Contact')}
             </button>
             <button
               type="button"
