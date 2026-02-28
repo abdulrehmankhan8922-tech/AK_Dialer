@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { callsAPI, agentsAPI } from '@/lib/api'
+import { callsAPI } from '@/lib/api'
 import TransferModal from './TransferModal'
 import type { Call } from '@/lib/api'
 
@@ -12,22 +12,9 @@ interface CallControlsProps {
 }
 
 export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate }: CallControlsProps) {
-  const [status, setStatus] = useState('available')
   const [manualDialNumber, setManualDialNumber] = useState('')
   const [loading, setLoading] = useState(false)
   const [showTransferModal, setShowTransferModal] = useState(false)
-
-  const handleStatusChange = async (newStatus: string) => {
-    setLoading(true)
-    try {
-      await agentsAPI.updateStatus(newStatus)
-      setStatus(newStatus)
-    } catch (error) {
-      console.error('Error updating status:', error)
-    } finally {
-      setLoading(false)
-    }
-  }
 
   const handleManualDial = async () => {
     if (!manualDialNumber.trim()) {
@@ -135,10 +122,6 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
     }
   }
 
-  const handleDialNext = () => {
-    // TODO: Implement dial next from queue
-    alert('Dial Next feature - to be implemented')
-  }
 
   return (
     <>
@@ -175,34 +158,8 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
         </div>
       </div>
 
-      {/* Status Buttons */}
+      {/* Call Control Buttons */}
       <div className="grid grid-cols-2 gap-3">
-        <button
-          onClick={() => handleStatusChange('paused')}
-          disabled={loading || status === 'paused'}
-          className={`px-4 py-3 rounded-lg flex items-center justify-center space-x-2 transition-all ${
-            status === 'paused'
-              ? 'bg-yellow-500 text-white shadow-md'
-              : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-600'
-          } disabled:opacity-50 font-medium`}
-        >
-          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
-          </svg>
-          <span>Pause</span>
-        </button>
-
-        <button
-          onClick={handleDialNext}
-          disabled={loading || !!currentCall}
-          className="px-4 py-3 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-600 disabled:opacity-50 flex items-center justify-center space-x-2 font-medium transition-colors"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.69l1.5 4.48a1 1 0 01-.5 1.21l-2.26 1.13a11.04 11.04 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.48 1.5a1 1 0 01.69.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z" />
-          </svg>
-          <span>Dial Next</span>
-        </button>
-
         <button
           onClick={handleMute}
           disabled={loading || !currentCall}

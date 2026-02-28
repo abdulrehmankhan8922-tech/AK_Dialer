@@ -20,7 +20,18 @@ class WebSocketManager {
   }
 
   private connectNative(token: string) {
-    const wsUrl = `${WS_URL.replace('ws://', 'http://').replace('wss://', 'https://')}/ws?token=${token}`
+    // Construct WebSocket URL properly
+    let wsUrl: string
+    if (WS_URL.startsWith('ws://') || WS_URL.startsWith('wss://')) {
+      // Already a WebSocket URL
+      wsUrl = `${WS_URL}/ws?token=${token}`
+    } else {
+      // Convert HTTP/HTTPS to WS/WSS
+      const baseUrl = WS_URL.replace('http://', 'ws://').replace('https://', 'wss://')
+      wsUrl = `${baseUrl}/ws?token=${token}`
+    }
+    
+    console.log('Connecting to WebSocket:', wsUrl.replace(/token=[^&]+/, 'token=***'))
     const ws = new WebSocket(wsUrl)
 
     ws.onopen = () => {
@@ -39,15 +50,20 @@ class WebSocketManager {
 
     ws.onerror = (error) => {
       console.error('WebSocket error:', error)
+      console.error('WebSocket URL was:', wsUrl.replace(/token=[^&]+/, 'token=***'))
     }
 
-    ws.onclose = () => {
-      console.log('WebSocket disconnected')
-      setTimeout(() => {
-        if (this.token) {
-          this.connectNative(this.token)
-        }
-      }, 3000)
+    ws.onclose = (event) => {
+      console.log('WebSocket disconnected', { code: event.code, reason: event.reason, wasClean: event.wasClean })
+      // Only reconnect if not a normal closure and we still have a token
+      if (event.code !== 1000 && this.token) {
+        console.log('Reconnecting WebSocket in 3 seconds...')
+        setTimeout(() => {
+          if (this.token) {
+            this.connectNative(this.token)
+          }
+        }, 3000)
+      }
     }
 
     // Store WebSocket in a way we can access it

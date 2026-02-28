@@ -145,52 +145,58 @@ class AMIEventListener:
             return
         
         self.running = True
-        logger.info("Starting AMI event listener (will connect in background)")
+        logger.info(f"Starting AMI event listener (will connect to {self.host}:{self.port} in background)")
         
         # Start connection retry loop in background - don't wait for it
         self.listener_task = asyncio.create_task(self._connection_and_event_loop())
     
     async def _connection_and_event_loop(self):
-        """Connect and then start event loop - runs in background"""
-        max_retries = 5
+        """Connect and then start event loop - runs in background with continuous retry"""
         retry_count = 0
+        max_initial_retries = 10
         
-        while self.running and retry_count < max_retries:
+        while self.running:
             try:
                 # Try to connect with short timeout
                 connected = await asyncio.wait_for(self.connect(), timeout=10.0)
                 if connected:
                     logger.info("AMI connected successfully, starting event listener")
+                    retry_count = 0  # Reset on successful connection
                     # Start the actual event loop
                     await self._event_loop()
-                    break
+                    # If event loop exits, try to reconnect
+                    if self.running:
+                        logger.warning("AMI event loop exited, reconnecting in 5s...")
+                        await asyncio.sleep(5)
                 else:
                     retry_count += 1
-                    if retry_count < max_retries:
-                        logger.warning(f"AMI connection failed, retrying in 10s (attempt {retry_count}/{max_retries})...")
+                    if retry_count < max_initial_retries:
+                        logger.warning(f"AMI connection failed, retrying in 10s (attempt {retry_count}/{max_initial_retries})...")
                         await asyncio.sleep(10)
                     else:
-                        logger.error("AMI connection failed after max retries, giving up")
-                        self.running = False
-                        break
+                        logger.error(f"AMI connection failed after {max_initial_retries} retries, will retry every 60s...")
+                        await asyncio.sleep(60)  # Wait longer before retrying
+                        retry_count = 0  # Reset counter for continuous retry
             except asyncio.TimeoutError:
                 retry_count += 1
-                if retry_count < max_retries:
-                    logger.warning(f"AMI connection timeout, retrying in 10s (attempt {retry_count}/{max_retries})...")
+                if retry_count < max_initial_retries:
+                    logger.warning(f"AMI connection timeout, retrying in 10s (attempt {retry_count}/{max_initial_retries})...")
                     await asyncio.sleep(10)
                 else:
-                    logger.error("AMI connection timeout after max retries, giving up")
-                    self.running = False
-                    break
+                    logger.error(f"AMI connection timeout after {max_initial_retries} retries, will retry every 60s...")
+                    await asyncio.sleep(60)
+                    retry_count = 0
             except Exception as e:
                 logger.error(f"AMI connection error: {e}, retrying in 10s...")
+                import traceback
+                logger.debug(f"AMI connection traceback: {traceback.format_exc()}")
                 retry_count += 1
-                if retry_count < max_retries:
+                if retry_count < max_initial_retries:
                     await asyncio.sleep(10)
                 else:
-                    logger.error("AMI connection failed after max retries, giving up")
-                    self.running = False
-                    break
+                    logger.error(f"AMI connection failed after {max_initial_retries} retries, will retry every 60s...")
+                    await asyncio.sleep(60)
+                    retry_count = 0
     
     async def stop_listening(self):
         """Stop listening to AMI events"""
@@ -291,17 +297,30 @@ class AMIEventListener:
     
     def _is_inbound_call(self, channel: str, context: str, caller_id_num: str) -> bool:
         """Determine if this is an inbound call based on channel, context, and caller ID"""
-        # Inbound calls come from trunk
+        # PRIMARY INDICATOR: Context is from-trunk (most reliable)
+        if context == 'from-trunk':
+            return True
+        
+        # SECONDARY: Channel is from trunk
         if self._is_trunk_channel(channel):
             return True
-        # Inbound calls have from-trunk context
-        if context == 'from-trunk' or 'trunk' in context.lower():
+        
+        # TERTIARY: Context contains 'trunk' (case-insensitive)
+        if context and 'trunk' in context.lower():
             return True
-        # For channels that don't have clear context, check if it's not an extension channel
-        # and has a caller ID (inbound calls have caller ID from external)
-        if not self._extract_extension_from_channel(channel) and caller_id_num:
-            # If it's not an extension and has caller ID, likely inbound
-            return True
+        
+        # If context is from-internal, it's definitely NOT inbound
+        if context == 'from-internal' or context == 'internal':
+            return False
+        
+        # For ambiguous cases: if it's NOT an extension channel and has caller ID,
+        # it might be inbound, but be conservative - only if we're sure
+        extension = self._extract_extension_from_channel(channel)
+        if not extension and caller_id_num and context:
+            # Only consider inbound if context suggests it (not from-internal)
+            if 'trunk' in context.lower() or 'external' in context.lower():
+                return True
+        
         return False
     
     def _extract_phone_number_from_channel(self, channel: str, context: str, exten: str) -> Optional[str]:
@@ -335,23 +354,28 @@ class AMIEventListener:
                 direction = None
                 phone_number = None
                 
-                # Detect inbound calls (from trunk) - check multiple indicators
+                # PRIMARY: Detect inbound calls (from trunk) - check context first
+                # Context 'from-trunk' is the most reliable indicator
                 is_inbound = self._is_inbound_call(channel, context, caller_id_num)
                 
                 if is_inbound:
                     direction = CallDirection.INBOUND
                     # For inbound, phone number is usually in CallerIDNum (caller's number)
                     phone_number = caller_id_num or exten
+                    if not phone_number:
+                        # If no caller ID, use exten (DID number)
+                        phone_number = exten
                     # Find agent by extension that will receive the call (from dialplan routing)
                     # Default to 8013 for now, but we'll update when we see the Dial event
                     agent = db.query(Agent).filter(Agent.phone_extension == '8013').first()
                     if not agent:
                         # Try 8014 as fallback
                         agent = db.query(Agent).filter(Agent.phone_extension == '8014').first()
+                    logger.info(f"✓ Detected INBOUND call: channel={channel}, context={context}, phone={phone_number}, caller_id={caller_id_num}, exten={exten}")
                 
-                # Detect outbound calls (from internal extensions)
-                # Only if NOT already identified as inbound and has extension in channel
-                elif context == 'from-internal' or 'internal' in context.lower():
+                # SECONDARY: Detect outbound calls (from internal extensions)
+                # Only if NOT already identified as inbound
+                elif context == 'from-internal' or (context and 'internal' in context.lower()):
                     # Check if this might be an extension channel for an inbound call
                     # (when Asterisk dials the extension, it creates a new channel)
                     extension = self._extract_extension_from_channel(channel)
@@ -369,12 +393,14 @@ class AMIEventListener:
                             agent = db.query(Agent).filter(Agent.phone_extension == extension).first()
                             # Phone number is the dialed number
                             phone_number = exten.lstrip('+')
+                            logger.info(f"✓ Detected OUTBOUND call: channel={channel}, context={context}, phone={phone_number}, extension={extension}")
                         else:
                             # This might be an extension channel for an inbound call, skip creating call here
                             # The DialBegin event will handle associating it with the inbound call
                             direction = None
                             agent = None
                             phone_number = None
+                            logger.debug(f"⏭ Skipping extension channel (likely part of inbound flow): channel={channel}, extension={extension}, exten={exten}")
                     else:
                         direction = CallDirection.OUTBOUND
                         # Extract extension from channel if possible
@@ -385,6 +411,7 @@ class AMIEventListener:
                         phone_number = self._extract_phone_number_from_channel(channel, context, exten)
                         if not phone_number and exten:
                             phone_number = exten.lstrip('+')
+                        logger.info(f"✓ Detected OUTBOUND call: channel={channel}, context={context}, phone={phone_number}, extension={extension}")
                 
                 # Only create call record if we have enough info
                 if direction and phone_number and agent:
@@ -708,20 +735,36 @@ class AMIEventListener:
         # Extract extension from destination (e.g., PJSIP/8013-xxxxx -> 8013)
         extension = self._extract_extension_from_channel(destination)
         
+        # Check if channel is a trunk channel (inbound call)
+        is_trunk_channel = self._is_trunk_channel(channel)
+        
         # For inbound calls, find the call by customer channel (the trunk channel)
         call_unique_id = channel_tracker.get_call_from_channel(channel)
         
         # If not found by channel, try to find by uniqueid or check if this is an inbound call
         if not call_unique_id:
             # Check if channel is a trunk channel (inbound call)
-            if self._is_trunk_channel(channel):
-                # Try to find existing inbound call by customer channel
+            if is_trunk_channel:
+                # Try to find existing call by customer channel (prefer INBOUND, but also check OUTBOUND to correct it)
                 db = SessionLocal()
                 try:
+                    # First try to find inbound call
                     call = db.query(Call).filter(
                         Call.customer_channel == channel,
                         Call.direction == CallDirection.INBOUND.value
                     ).order_by(Call.start_time.desc()).first()
+                    
+                    # If not found, try to find any call with this channel (might be misclassified)
+                    if not call:
+                        call = db.query(Call).filter(
+                            Call.customer_channel == channel
+                        ).order_by(Call.start_time.desc()).first()
+                        # If found but wrong direction, correct it
+                        if call and call.direction == CallDirection.OUTBOUND.value:
+                            call.direction = CallDirection.INBOUND.value
+                            db.commit()
+                            logger.warning(f"Corrected call {call.id} direction from OUTBOUND to INBOUND (trunk channel detected)")
+                    
                     if call and call.call_unique_id:
                         call_unique_id = call.call_unique_id
                         channel_tracker.register_call(call_unique_id)
@@ -736,10 +779,18 @@ class AMIEventListener:
             try:
                 call = db.query(Call).filter(Call.call_unique_id == call_unique_id).first()
                 if call:
+                    # If this is a trunk channel dialing an extension, it's definitely INBOUND
                     # Update direction to INBOUND if it was incorrectly set
-                    if call.direction != CallDirection.INBOUND.value:
+                    if self._is_trunk_channel(channel) and call.direction != CallDirection.INBOUND.value:
                         call.direction = CallDirection.INBOUND.value
-                        logger.info(f"Corrected call direction to INBOUND for {call_unique_id}")
+                        logger.warning(f"Corrected call direction from {call.direction} to INBOUND for {call_unique_id} (trunk channel dialing extension)")
+                    # Also check if the source channel context was from-trunk
+                    elif call.direction == CallDirection.OUTBOUND.value:
+                        # Double-check: if we're dialing an extension from a trunk, it's inbound
+                        # The channel that started this is the trunk channel
+                        if self._is_trunk_channel(channel):
+                            call.direction = CallDirection.INBOUND.value
+                            logger.warning(f"Corrected call direction from OUTBOUND to INBOUND for {call_unique_id}")
                     
                     # Find agent by extension
                     agent = db.query(Agent).filter(Agent.phone_extension == extension).first()
