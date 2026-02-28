@@ -84,11 +84,17 @@ export interface Call {
   direction: string
   status: string
   start_time: string
+  ring_time?: string
+  answered_time?: string
   end_time?: string
   duration: number
+  ring_duration: number
+  talk_duration: number
   call_unique_id?: string
   is_muted?: boolean
   is_on_hold?: boolean
+  disposition?: string
+  notes?: string
 }
 
 export interface Contact {
