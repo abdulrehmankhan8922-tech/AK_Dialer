@@ -122,6 +122,25 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
     }
   }
 
+  const handleDialNext = async () => {
+    if (currentCall) {
+      alert('Please hangup current call before dialing next')
+      return
+    }
+
+    setLoading(true)
+    try {
+      await callsAPI.dialNext()
+      onCallUpdate()
+      onStatsUpdate()
+    } catch (error: any) {
+      const errorMsg = error.response?.data?.detail || 'No more contacts available'
+      alert(errorMsg)
+    } finally {
+      setLoading(false)
+    }
+  }
+
 
   return (
     <>
@@ -160,6 +179,17 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
 
       {/* Call Control Buttons */}
       <div className="grid grid-cols-2 gap-3">
+        <button
+          onClick={handleDialNext}
+          disabled={loading || !!currentCall}
+          className="px-4 py-3 rounded-lg bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 flex items-center justify-center space-x-2 font-medium transition-colors shadow-sm"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.69l1.5 4.48a1 1 0 01-.5 1.21l-2.26 1.13a11.04 11.04 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.48 1.5a1 1 0 01.69.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z" />
+          </svg>
+          <span>Dial Next</span>
+        </button>
+
         <button
           onClick={handleMute}
           disabled={loading || !currentCall}

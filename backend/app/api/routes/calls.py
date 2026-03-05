@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from typing import List
+from typing import List, Optional
 from app.core.database import get_db
 from app.core.config import settings
 from app.schemas.call import DialRequest, CallResponse, DispositionRequest
@@ -35,6 +35,16 @@ async def dial(
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
         if not agent:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        
+        # Update contact if contact_id is provided
+        contact = None
+        if dial_request.contact_id:
+            contact = db.query(Contact).filter(Contact.id == dial_request.contact_id).first()
+            if contact:
+                # Update contact dialing info
+                contact.last_dialed_at = datetime.now(timezone.utc)
+                contact.dial_attempts = (contact.dial_attempts or 0) + 1
+                # Don't change status yet - will update based on call result
         
         # Create call record
         call_unique_id = str(uuid.uuid4())
@@ -94,6 +104,61 @@ async def dial(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error initiating call")
 
 
+@router.post("/dial-next", response_model=CallResponse)
+async def dial_next(
+    campaign_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Auto-dial next available contact"""
+    try:
+        from app.models.agent import Agent
+        
+        agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        if not agent:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        
+        # Use campaign_id from agent if not provided
+        if not campaign_id and hasattr(agent, 'campaign_id') and agent.campaign_id:
+            campaign_id = agent.campaign_id
+        
+        # Get next contact
+        contact = db.query(Contact).filter(
+            Contact.status == ContactStatus.NEW.value,
+            Contact.status != ContactStatus.DO_NOT_CALL.value
+        )
+        
+        if campaign_id:
+            contact = contact.filter(Contact.campaign_id == campaign_id)
+        
+        contact = contact.order_by(Contact.created_at.asc()).first()
+        
+        if not contact:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No more contacts available to dial"
+            )
+        
+        # Create dial request
+        dial_request = DialRequest(
+            phone_number=contact.phone,
+            campaign_id=contact.campaign_id,
+            contact_id=contact.id
+        )
+        
+        # Use existing dial endpoint logic
+        return await dial(dial_request, db, agent_id)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error dialing next contact: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error dialing next contact"
+        )
+
+
 @router.post("/hangup/{call_id}")
 async def hangup(call_id: int, db: Session = Depends(get_db), agent_id: int = Depends(get_current_agent_id)):
     """Hangup a call"""
@@ -118,6 +183,21 @@ async def hangup(call_id: int, db: Session = Depends(get_db), agent_id: int = De
             if call.answered_time:
                 talk_duration = (call.end_time - call.answered_time).total_seconds()
                 call.talk_duration = int(talk_duration)
+            
+            # Update contact status based on call result
+            if call.contact_id:
+                contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+                if contact:
+                    # Update contact status based on call status
+                    # This will be refined by AMI event listener, but set basic status here
+                    if call.status == CallStatus.ANSWERED.value or call.status == CallStatus.CONNECTED.value:
+                        contact.status = ContactStatus.CONTACTED
+                    elif call.status == CallStatus.BUSY.value:
+                        contact.status = ContactStatus.BUSY
+                    elif call.status == CallStatus.NO_ANSWER.value:
+                        contact.status = ContactStatus.NOT_ANSWERED
+                    elif call.status == CallStatus.FAILED.value:
+                        contact.status = ContactStatus.FAILED
             
             # Update agent status
             agent = db.query(Agent).filter(Agent.id == agent_id).first()

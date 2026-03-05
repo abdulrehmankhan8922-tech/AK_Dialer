@@ -98,6 +98,8 @@ class Contact(Base):
     comments = Column(String, nullable=True)
     # Use EnumValueType for status as well to ensure we store enum values ('new', 'contacted', etc.) not names
     status = Column(EnumValueType(ContactStatus, enum_name='contact_status_enum'), default=ContactStatus.NEW)
+    last_dialed_at = Column(DateTime(timezone=True), nullable=True)  # When contact was last dialed
+    dial_attempts = Column(Integer, default=0)  # Number of dial attempts
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

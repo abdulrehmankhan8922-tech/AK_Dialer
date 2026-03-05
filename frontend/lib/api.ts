@@ -100,6 +100,8 @@ export interface Call {
 export interface Contact {
   id: number
   campaign_id: number
+  last_dialed_at?: string
+  dial_attempts: number
   name?: string
   phone: string
   address?: string
@@ -261,6 +263,11 @@ export const callsAPI = {
     const response = await api.get(`/api/calls/${call_id}/recordings`)
     return response.data
   },
+  dialNext: async (campaign_id?: number): Promise<Call> => {
+    const params = campaign_id ? { campaign_id } : {}
+    const response = await api.post<Call>('/api/calls/dial-next', null, { params })
+    return response.data
+  },
 }
 
 export const contactsAPI = {
@@ -290,6 +297,17 @@ export const contactsAPI = {
         'Content-Type': 'multipart/form-data',
       },
     })
+    return response.data
+  },
+  getNext: async (campaign_id?: number): Promise<Contact | null> => {
+    const params = campaign_id ? { campaign_id } : {}
+    const response = await api.get<Contact | null>('/api/contacts/next', { params })
+    return response.data
+  },
+  getDialed: async (campaign_id?: number, limit: number = 50): Promise<Contact[]> => {
+    const params: any = { limit }
+    if (campaign_id) params.campaign_id = campaign_id
+    const response = await api.get<Contact[]>('/api/contacts/dialed', { params })
     return response.data
   },
 }

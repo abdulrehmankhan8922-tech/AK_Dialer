@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_
 from typing import Optional, List
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 import io
 from app.core.database import get_db
@@ -230,3 +232,67 @@ async def import_contacts(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error importing contacts: {str(e)}")
+
+
+@router.get("/next", response_model=Optional[ContactResponse])
+async def get_next_contact(
+    campaign_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Get next available contact to dial (status = NEW, not DO_NOT_CALL)"""
+    from app.models.agent import Agent
+    
+    # Get agent's campaign if campaign_id not provided
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Build query for next contact
+    query = db.query(Contact).filter(
+        Contact.status == ContactStatus.NEW.value,
+        Contact.status != ContactStatus.DO_NOT_CALL.value
+    )
+    
+    # Filter by campaign if provided or agent has campaign
+    if campaign_id:
+        query = query.filter(Contact.campaign_id == campaign_id)
+    elif hasattr(agent, 'campaign_id') and agent.campaign_id:
+        query = query.filter(Contact.campaign_id == agent.campaign_id)
+    
+    # Get oldest NEW contact (first in, first out)
+    contact = query.order_by(Contact.created_at.asc()).first()
+    
+    if not contact:
+        return None
+    
+    return ContactResponse.model_validate(contact)
+
+
+@router.get("/dialed", response_model=List[ContactResponse])
+async def get_dialed_contacts(
+    campaign_id: Optional[int] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Get all dialed contacts (contacts that have been dialed at least once)"""
+    from app.models.agent import Agent
+    
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Build query for dialed contacts
+    query = db.query(Contact).filter(
+        Contact.last_dialed_at.isnot(None)
+    )
+    
+    # Filter by campaign if provided
+    if campaign_id:
+        query = query.filter(Contact.campaign_id == campaign_id)
+    
+    # Order by most recently dialed first
+    contacts = query.order_by(Contact.last_dialed_at.desc()).limit(limit).all()
+    
+    return [ContactResponse.model_validate(contact) for contact in contacts]

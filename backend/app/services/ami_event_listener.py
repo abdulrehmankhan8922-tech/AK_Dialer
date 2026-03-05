@@ -636,6 +636,22 @@ class AMIEventListener:
                 elif cause_code > 0:
                     call.status = CallStatus.FAILED.value
                 
+                # Update contact status based on call result
+                if call.contact_id:
+                    from app.models.contact import Contact, ContactStatus
+                    contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+                    if contact:
+                        # Update contact status based on final call status
+                        if call.status == CallStatus.ANSWERED.value or call.status == CallStatus.CONNECTED.value:
+                            contact.status = ContactStatus.CONTACTED
+                        elif call.status == CallStatus.BUSY.value:
+                            contact.status = ContactStatus.BUSY
+                        elif call.status == CallStatus.NO_ANSWER.value:
+                            contact.status = ContactStatus.NOT_ANSWERED
+                        elif call.status == CallStatus.FAILED.value:
+                            contact.status = ContactStatus.FAILED
+                        # Note: contact.last_dialed_at and dial_attempts are updated in dial endpoint
+                
                 # Update agent status
                 if call.agent_id:
                     agent = db.query(Agent).filter(Agent.id == call.agent_id).first()

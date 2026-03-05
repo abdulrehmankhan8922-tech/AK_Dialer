@@ -28,6 +28,8 @@ class ContactResponse(ContactBase):
     id: int
     campaign_id: int
     status: ContactStatus
+    last_dialed_at: Optional[datetime] = None
+    dial_attempts: int = 0
     created_at: datetime
     updated_at: Optional[datetime] = None
 

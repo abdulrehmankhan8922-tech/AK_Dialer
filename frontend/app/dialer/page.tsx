@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { authAPI, agentsAPI, callsAPI, statsAPI, campaignsAPI } from '@/lib/api'
+import { authAPI, agentsAPI, callsAPI, statsAPI, campaignsAPI, contactsAPI } from '@/lib/api'
 import { wsManager } from '@/lib/websocket'
 import CallControls from '@/components/agent/CallControls'
 import CustomerInfoForm from '@/components/agent/CustomerInfoForm'
@@ -13,7 +13,7 @@ import CallHistory from '@/components/agent/CallHistory'
 import IncomingCallModal from '@/components/agent/IncomingCallModal'
 import WebRTCSoftphone from '@/components/agent/WebRTCSoftphone'
 import DashboardLayout from '@/components/shared/DashboardLayout'
-import type { Call, Stats, Campaign } from '@/lib/api'
+import type { Call, Stats, Campaign, Contact } from '@/lib/api'
 
 export default function DialerPage() {
   const router = useRouter()
@@ -26,6 +26,8 @@ export default function DialerPage() {
   const [loading, setLoading] = useState(true)
   const [currentTime, setCurrentTime] = useState(new Date())
   const [activeTab, setActiveTab] = useState<'dialer' | 'history'>('dialer')
+  const [dialedContacts, setDialedContacts] = useState<Contact[]>([])
+  const [autoDialEnabled, setAutoDialEnabled] = useState(false)
 
   // Helper function to check if a call is active
   const isCallActive = (call: Call | null): boolean => {
@@ -98,6 +100,9 @@ export default function DialerPage() {
 
         // Load current call
         loadCurrentCall().catch(console.error)
+
+        // Load dialed contacts
+        loadDialedContacts().catch(console.error)
 
         // Refresh current call periodically (every 2 seconds)
         // This ensures we catch any status changes even if WebSocket misses them
@@ -200,12 +205,47 @@ export default function DialerPage() {
     }
   }
 
+  const loadDialedContacts = async () => {
+    try {
+      const campaignId = sessionInfo?.campaign_id
+      const contacts = await contactsAPI.getDialed(campaignId, 20)
+      setDialedContacts(contacts)
+    } catch (error) {
+      console.error('Error loading dialed contacts:', error)
+    }
+  }
+
+  const handleAutoDialNext = async (callStatus: string) => {
+    // Auto-dial next if call failed and auto-dial is enabled
+    const failedStatuses = ['busy', 'no_answer', 'failed']
+    if (autoDialEnabled && failedStatuses.includes(callStatus)) {
+      try {
+        // Small delay before dialing next
+        setTimeout(async () => {
+          await callsAPI.dialNext(sessionInfo?.campaign_id)
+          loadStats()
+          loadDialedContacts()
+        }, 2000)
+      } catch (error: any) {
+        console.error('Auto-dial error:', error)
+        // If no more contacts, disable auto-dial
+        if (error.response?.status === 404) {
+          setAutoDialEnabled(false)
+        }
+      }
+    }
+  }
+
   const handleCallUpdate = (data: any) => {
     // If status is ended/failed/busy/no_answer, clear the call immediately
     const endedStatuses = ['ended', 'failed', 'busy', 'no_answer', 'transferred', 'parked']
     if (data.status && endedStatuses.includes(data.status)) {
       setCurrentCall(null)
       loadStats() // Refresh stats
+      loadDialedContacts() // Refresh dialed contacts
+      
+      // Auto-dial next if enabled
+      handleAutoDialNext(data.status)
       return
     }
     
@@ -360,12 +400,23 @@ export default function DialerPage() {
             <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 shadow-sm">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Call Controls</h2>
-                {currentCall && (
-                  <span className="inline-flex items-center px-3 py-1 rounded-full bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 text-xs font-medium">
-                    <span className="w-1.5 h-1.5 bg-green-600 rounded-full animate-pulse mr-2"></span>
-                    Active Call
-                  </span>
-                )}
+                <div className="flex items-center space-x-3">
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={autoDialEnabled}
+                      onChange={(e) => setAutoDialEnabled(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                    />
+                    <span className="text-sm text-slate-600 dark:text-slate-400">Auto-Dial</span>
+                  </label>
+                  {currentCall && (
+                    <span className="inline-flex items-center px-3 py-1 rounded-full bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 text-xs font-medium">
+                      <span className="w-1.5 h-1.5 bg-green-600 rounded-full animate-pulse mr-2"></span>
+                      Active Call
+                    </span>
+                  )}
+                </div>
               </div>
               <CallControls
                 currentCall={currentCall}
@@ -398,6 +449,70 @@ export default function DialerPage() {
               Customer Information
             </h2>
             <CustomerInfoForm currentCall={currentCall} campaigns={campaigns} />
+          </div>
+
+          {/* Dialed Contacts Section */}
+          <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 shadow-sm">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Dialed Contacts</h2>
+              <button
+                onClick={loadDialedContacts}
+                className="p-2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
+                title="Refresh dialed contacts"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+            </div>
+            {dialedContacts.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
+                  <thead className="bg-slate-50 dark:bg-slate-900">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Name</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Phone</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Status</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Attempts</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Last Dialed</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
+                    {dialedContacts.map((contact) => (
+                      <tr key={contact.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/50">
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-900 dark:text-slate-100">
+                          {contact.name || 'N/A'}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-900 dark:text-slate-100">
+                          {contact.phone}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                            contact.status === 'contacted' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' :
+                            contact.status === 'busy' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300' :
+                            contact.status === 'not_answered' ? 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300' :
+                            contact.status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300' :
+                            'bg-slate-100 text-slate-800 dark:bg-slate-700 dark:text-slate-300'
+                          }`}>
+                            {contact.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-900 dark:text-slate-100">
+                          {contact.dial_attempts || 0}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-500 dark:text-slate-400">
+                          {contact.last_dialed_at ? new Date(contact.last_dialed_at).toLocaleString() : 'N/A'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-center py-8 text-slate-500 dark:text-slate-400">
+                No dialed contacts yet
+              </div>
+            )}
           </div>
 
           {/* Disposition Codes - Only show when call is active */}
