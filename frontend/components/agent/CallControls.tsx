@@ -1,7 +1,8 @@
 'use client'
 
-import { useState } from 'react'
-import { callsAPI } from '@/lib/api'
+import { useState, useEffect, useRef } from 'react'
+import { callsAPI, agentsAPI } from '@/lib/api'
+import { useWebRTCSoftphone } from '@/hooks/useWebRTCSoftphone'
 import TransferModal from './TransferModal'
 import type { Call } from '@/lib/api'
 
@@ -15,6 +16,51 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
   const [manualDialNumber, setManualDialNumber] = useState('')
   const [loading, setLoading] = useState(false)
   const [showTransferModal, setShowTransferModal] = useState(false)
+  const [agentInfo, setAgentInfo] = useState<any>(null)
+  const [useWebRTC, setUseWebRTC] = useState(true) // Enable WebRTC by default
+  
+  // Get agent info for WebRTC
+  useEffect(() => {
+    const loadAgentInfo = async () => {
+      try {
+        const agent = await agentsAPI.getMe()
+        setAgentInfo(agent)
+      } catch (error) {
+        console.error('Error loading agent info:', error)
+      }
+    }
+    loadAgentInfo()
+  }, [])
+
+  // WebRTC softphone hook
+  const {
+    isConnected: webrtcConnected,
+    isInCall: webrtcInCall,
+    dial: webrtcDial,
+    hangup: webrtcHangup,
+    connect: webrtcConnect,
+    disconnect: webrtcDisconnect,
+    error: webrtcError,
+  } = useWebRTCSoftphone({
+    enabled: useWebRTC && !!agentInfo,
+    server: (typeof window !== 'undefined' ? process.env.NEXT_PUBLIC_WEBRTC_SERVER : null) || 'wss://101.50.86.185:8089/ws',
+    username: agentInfo?.phone_extension,
+    password: 'password123', // TODO: Get from secure storage
+  })
+
+  // Auto-connect WebRTC when agent info is loaded
+  useEffect(() => {
+    if (useWebRTC && agentInfo && !webrtcConnected) {
+      webrtcConnect().catch((err) => {
+        console.error('WebRTC auto-connect failed:', err)
+      })
+    }
+    return () => {
+      if (webrtcConnected) {
+        webrtcDisconnect().catch(console.error)
+      }
+    }
+  }, [useWebRTC, agentInfo, webrtcConnected])
 
   const handleManualDial = async () => {
     if (!manualDialNumber.trim()) {
@@ -24,11 +70,23 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
 
     setLoading(true)
     try {
-      await callsAPI.dial(manualDialNumber)
+      if (useWebRTC && webrtcConnected) {
+        // Use WebRTC to dial directly from browser
+        await webrtcDial(manualDialNumber)
+        // Also create call record in backend for tracking
+        try {
+          await callsAPI.dial(manualDialNumber)
+        } catch (apiError) {
+          console.warn('Backend call record creation failed, but WebRTC call proceeding:', apiError)
+        }
+      } else {
+        // Fallback to backend dialing (AMI)
+        await callsAPI.dial(manualDialNumber)
+      }
       setManualDialNumber('')
       onCallUpdate()
     } catch (error: any) {
-      alert(error.response?.data?.detail || 'Error making call')
+      alert(error.response?.data?.detail || error.message || 'Error making call')
     } finally {
       setLoading(false)
     }
@@ -39,7 +97,18 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
 
     setLoading(true)
     try {
+      // Hangup WebRTC call if active
+      if (useWebRTC && webrtcInCall) {
+        try {
+          await webrtcHangup()
+        } catch (webrtcError) {
+          console.warn('WebRTC hangup error:', webrtcError)
+        }
+      }
+      
+      // Hangup via backend API
       await callsAPI.hangup(currentCall.id)
+      
       // Immediately trigger update - the backend should mark call as ended
       // This will cause loadCurrentCall to return null and clear the UI
       onCallUpdate()
@@ -130,7 +199,16 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
 
     setLoading(true)
     try {
-      await callsAPI.dialNext()
+      // Get next contact and dial via WebRTC if enabled
+      if (useWebRTC && webrtcConnected) {
+        // Get next contact phone number
+        const callResponse = await callsAPI.dialNext()
+        if (callResponse && callResponse.phone_number) {
+          await webrtcDial(callResponse.phone_number)
+        }
+      } else {
+        await callsAPI.dialNext()
+      }
       onCallUpdate()
       onStatsUpdate()
     } catch (error: any) {
@@ -153,11 +231,37 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
       )}
       
       <div className="space-y-5">
+      {/* WebRTC Status */}
+      {useWebRTC && (
+        <div className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
+          <div className="flex items-center space-x-2">
+            <div className={`w-2 h-2 rounded-full ${webrtcConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
+            <span className="text-sm text-slate-600 dark:text-slate-400">
+              WebRTC: {webrtcConnected ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+          {webrtcError && (
+            <span className="text-xs text-red-600 dark:text-red-400">{webrtcError}</span>
+          )}
+        </div>
+      )}
+
       {/* Manual Dial */}
       <div className="space-y-2">
-        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-          Manual Dial
-        </label>
+        <div className="flex items-center justify-between mb-2">
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
+            Manual Dial
+          </label>
+          <label className="flex items-center space-x-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={useWebRTC}
+              onChange={(e) => setUseWebRTC(e.target.checked)}
+              className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+            />
+            <span className="text-xs text-slate-600 dark:text-slate-400">Use WebRTC</span>
+          </label>
+        </div>
         <div className="flex space-x-3">
           <input
             type="text"

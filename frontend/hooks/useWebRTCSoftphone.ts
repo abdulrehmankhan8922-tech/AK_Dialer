@@ -114,7 +114,9 @@ export function useWebRTCSoftphone(options: UseWebRTCSoftphoneOptions = {}): Use
       setError(null)
       await softphoneRef.current.connect()
     } catch (err: any) {
-      setError(err.message || 'Connection failed')
+      const errorMsg = err.message || 'Connection failed'
+      setError(errorMsg)
+      console.error('WebRTC connection error:', errorMsg)
       throw err
     }
   }, [server, username, password, displayName])

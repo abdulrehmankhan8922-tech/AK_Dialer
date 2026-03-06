@@ -101,8 +101,15 @@ export class WebRTCSoftphone {
       await this.registerer.register()
 
       console.log('WebRTC Softphone connected and registered')
-    } catch (error) {
-      console.error('Error connecting WebRTC softphone:', error)
+    } catch (error: any) {
+      const errorMsg = error.message || String(error)
+      console.error('Error connecting WebRTC softphone:', errorMsg)
+      
+      // Provide helpful error messages
+      if (errorMsg.includes('WebSocket') || errorMsg.includes('1006')) {
+        throw new Error('WebRTC connection failed. Check: 1) Asterisk WebRTC transport configured, 2) Port 8089 open, 3) Firewall allows 8089/tcp')
+      }
+      
       throw error
     }
   }
@@ -135,6 +142,7 @@ export class WebRTCSoftphone {
 
   /**
    * Make an outbound call
+   * Routes through Asterisk dialplan (from-internal context)
    */
   async dial(phoneNumber: string): Promise<void> {
     if (!this.userAgent || !this.callState.isRegistered) {
@@ -147,6 +155,9 @@ export class WebRTCSoftphone {
 
     try {
       const domain = this.config.server.replace(/^wss?:\/\//, '').split('/')[0].split(':')[0]
+      
+      // Dial through Asterisk dialplan: sip:phoneNumber@domain
+      // Asterisk will route this through from-internal context to the trunk
       const targetURI = UserAgent.makeURI(`sip:${phoneNumber}@${domain}`)
       
       if (!targetURI) {
@@ -158,6 +169,12 @@ export class WebRTCSoftphone {
           constraints: {
             audio: true,
             video: false,
+          },
+        },
+        // Add Request URI to ensure proper routing
+        requestDelegate: {
+          onReject: (response) => {
+            console.log('Call rejected:', response)
           },
         },
       })

@@ -45,36 +45,6 @@ async def create_contact(contact: ContactCreate, db: Session = Depends(get_db)):
     return ContactResponse.model_validate(db_contact)
 
 
-@router.put("/{contact_id}", response_model=ContactResponse)
-async def update_contact(
-    contact_id: int,
-    contact_update: ContactUpdate,
-    db: Session = Depends(get_db),
-    agent_id: int = Depends(get_current_agent_id)
-):
-    """Update contact information"""
-    contact = db.query(Contact).filter(Contact.id == contact_id).first()
-    if not contact:
-        raise HTTPException(status_code=404, detail="Contact not found")
-    
-    update_data = contact_update.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(contact, field, value)
-    
-    db.commit()
-    db.refresh(contact)
-    return ContactResponse.from_orm(contact)
-
-
-@router.get("/{contact_id}", response_model=ContactResponse)
-async def get_contact(contact_id: int, db: Session = Depends(get_db)):
-    """Get contact by ID"""
-    contact = db.query(Contact).filter(Contact.id == contact_id).first()
-    if not contact:
-        raise HTTPException(status_code=404, detail="Contact not found")
-    return ContactResponse.from_orm(contact)
-
-
 @router.post("/import", response_model=dict)
 async def import_contacts(
     file: UploadFile = File(...),
@@ -296,3 +266,33 @@ async def get_dialed_contacts(
     contacts = query.order_by(Contact.last_dialed_at.desc()).limit(limit).all()
     
     return [ContactResponse.model_validate(contact) for contact in contacts]
+
+
+@router.get("/{contact_id}", response_model=ContactResponse)
+async def get_contact(contact_id: int, db: Session = Depends(get_db)):
+    """Get contact by ID"""
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return ContactResponse.from_orm(contact)
+
+
+@router.put("/{contact_id}", response_model=ContactResponse)
+async def update_contact(
+    contact_id: int,
+    contact_update: ContactUpdate,
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Update contact information"""
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    
+    update_data = contact_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(contact, field, value)
+    
+    db.commit()
+    db.refresh(contact)
+    return ContactResponse.from_orm(contact)
