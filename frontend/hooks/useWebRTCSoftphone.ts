@@ -32,7 +32,7 @@ export interface UseWebRTCSoftphoneReturn {
 export function useWebRTCSoftphone(options: UseWebRTCSoftphoneOptions = {}): UseWebRTCSoftphoneReturn {
   const {
     enabled = true,
-    server = 'wss://163.245.208.168:8089/ws', // Default to your server
+    server = 'ws://101.50.86.185:8089/ws', // Default to your server (ws:// for non-SSL)
     username,
     password,
     displayName,

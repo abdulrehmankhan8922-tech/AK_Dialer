@@ -43,7 +43,7 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
     error: webrtcError,
   } = useWebRTCSoftphone({
     enabled: useWebRTC && !!agentInfo,
-    server: (typeof window !== 'undefined' ? process.env.NEXT_PUBLIC_WEBRTC_SERVER : null) || 'wss://101.50.86.185:8089/ws',
+    server: (typeof window !== 'undefined' ? process.env.NEXT_PUBLIC_WEBRTC_SERVER : null) || 'ws://101.50.86.185:8089/ws',
     username: agentInfo?.phone_extension,
     password: 'password123', // TODO: Get from secure storage
   })

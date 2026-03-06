@@ -5,19 +5,21 @@ WebRTC allows agents to make and receive calls directly from the web browser wit
 
 ## Asterisk Configuration
 
-### 1. Enable WebRTC Transport in PJSIP
+### 1. Enable WebRTC Transport in PJSIP (Without SSL)
 
 Add to `/etc/asterisk/pjsip.conf`:
 
 ```ini
-[transport-wss]
+[transport-ws]
 type=transport
-protocol=wss
+protocol=ws
 bind=0.0.0.0:8089
 external_media_address=101.50.86.185
 external_signaling_address=101.50.86.185
 local_net=172.16.180.0/23
 ```
+
+**Note:** Using `ws://` (non-SSL) for now. For production with SSL, use `wss://` and `protocol=wss`.
 
 ### 2. Update Extension Endpoints
 
@@ -59,22 +61,24 @@ sudo asterisk -rx "module reload res_pjsip"
 
 Create or update `frontend/.env.local`:
 ```env
-NEXT_PUBLIC_WEBRTC_SERVER=wss://101.50.86.185:8089/ws
+NEXT_PUBLIC_WEBRTC_SERVER=ws://101.50.86.185:8089/ws
 ```
 
 **Option 2: Add to `backend/.env` (if using shared config):**
 
 Add to `backend/.env`:
 ```env
-NEXT_PUBLIC_WEBRTC_SERVER=wss://101.50.86.185:8089/ws
+NEXT_PUBLIC_WEBRTC_SERVER=ws://101.50.86.185:8089/ws
 ```
 
 **Option 3: Already configured in `frontend/next.config.js`:**
 
-The default is already set in `next.config.js`:
+The default is already set in `next.config.js` (using `ws://` for non-SSL):
 ```js
-NEXT_PUBLIC_WEBRTC_SERVER: process.env.NEXT_PUBLIC_WEBRTC_SERVER || 'wss://101.50.86.185:8089/ws',
+NEXT_PUBLIC_WEBRTC_SERVER: process.env.NEXT_PUBLIC_WEBRTC_SERVER || 'ws://101.50.86.185:8089/ws',
 ```
+
+**Note:** Using `ws://` (non-SSL) for now. For production with SSL, use `wss://`.
 
 **Note:** For production, set this in your deployment environment variables or `.env.local` file.
 
@@ -102,22 +106,22 @@ NEXT_PUBLIC_WEBRTC_SERVER: process.env.NEXT_PUBLIC_WEBRTC_SERVER || 'wss://101.5
 #### 1. Check Asterisk WebRTC Transport is Configured
 
 ```bash
-# Check if transport-wss exists
+# Check if transport-ws exists
 sudo asterisk -rx "pjsip show transports"
 ```
 
 **Expected output should include:**
 ```
-Transport: transport-wss
-    protocol: wss
+Transport: transport-ws
+    protocol: ws
     bind: 0.0.0.0:8089
 ```
 
 **If missing, add to `/etc/asterisk/pjsip.conf`:**
 ```ini
-[transport-wss]
+[transport-ws]
 type=transport
-protocol=wss
+protocol=ws
 bind=0.0.0.0:8089
 external_media_address=101.50.86.185
 external_signaling_address=101.50.86.185
@@ -151,17 +155,17 @@ sudo ss -tlnp | grep 8089
   sudo systemctl status asterisk
   ```
 
-#### 3. Check SSL/TLS Certificate (for WSS)
+#### 3. Using WS (Non-SSL) - Current Setup
 
-WSS requires SSL. If using self-signed cert, browser may block it.
+**We're using `ws://` (non-SSL) which doesn't require SSL certificate:**
+- Frontend uses `ws://101.50.86.185:8089/ws`
+- Asterisk transport uses `protocol=ws`
+- No domain or SSL certificate needed
 
-**Option A: Use WS instead of WSS (less secure, for testing):**
-- Change `wss://` to `ws://` in frontend config
-- Update Asterisk transport to `protocol=ws` instead of `wss`
-
-**Option B: Configure proper SSL certificate:**
+**For Production (Optional - SSL):**
+- Change `ws://` to `wss://` in frontend config
+- Update Asterisk transport to `protocol=wss`
 - Install SSL certificate for your domain
-- Configure Asterisk to use it
 
 #### 4. Verify Extension Has WebRTC Transport
 
@@ -172,13 +176,13 @@ sudo asterisk -rx "pjsip show endpoint 8013"
 
 **Should show:**
 ```
-Transport: transport-udp, transport-wss
+Transport: transport-udp, transport-ws
 ```
 
 **If missing, add to extension in `pjsip.conf`:**
 ```ini
 transport=transport-udp
-transport=transport-wss  ; Add this line
+transport=transport-ws  ; Add this line (ws for non-SSL)
 ```
 
 #### 5. Check Browser Console
@@ -198,8 +202,8 @@ curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
 
 ### Quick Fix Checklist
 
-1. ✅ Add `[transport-wss]` section to `/etc/asterisk/pjsip.conf`
-2. ✅ Add `transport=transport-wss` to extension endpoints
+1. ✅ Add `[transport-ws]` section to `/etc/asterisk/pjsip.conf` (using `protocol=ws` for non-SSL)
+2. ✅ Add `transport=transport-ws` to extension endpoints
 3. ✅ Reload: `sudo asterisk -rx "module reload res_pjsip"`
 4. ✅ Open firewall: `sudo ufw allow 8089/tcp`
 5. ✅ Verify: `sudo asterisk -rx "pjsip show transports"`
@@ -213,11 +217,12 @@ curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
    sudo tail -f /var/log/asterisk/messages.log
    ```
 
-3. Ensure extension has both `transport-udp` and `transport-wss`
+3. Ensure extension has both `transport-udp` and `transport-ws`
 
 ## Security Notes
 
-- WebRTC uses WSS (secure WebSocket) on port 8089
-- Ensure proper firewall rules
-- Use HTTPS for production (required for WebRTC in browsers)
+- **Current Setup:** Using `ws://` (non-SSL) - works without domain/SSL certificate
+- **For Production:** Consider using `wss://` (SSL) with proper certificate for security
+- Ensure proper firewall rules (port 8089)
+- **Browser Note:** Some browsers may require HTTPS for WebRTC. If using `ws://`, ensure your frontend is on HTTP (not HTTPS) or configure SSL later
 - For testing, you can use `ws://` instead of `wss://` (less secure)

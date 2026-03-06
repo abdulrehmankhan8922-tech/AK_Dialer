@@ -19,7 +19,7 @@ export default function WebRTCSoftphone({
   agentPassword,
   onCallStateChange 
 }: WebRTCSoftphoneProps) {
-  const [server, setServer] = useState('wss://163.245.208.168:8089/ws')
+  const [server, setServer] = useState('ws://101.50.86.185:8089/ws')
   
   const {
     isConnected,
