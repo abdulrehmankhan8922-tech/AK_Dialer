@@ -171,12 +171,6 @@ export class WebRTCSoftphone {
             video: false,
           },
         },
-        // Add Request URI to ensure proper routing
-        requestDelegate: {
-          onReject: (response) => {
-            console.log('Call rejected:', response)
-          },
-        },
       })
 
       // Handle session state changes
