@@ -83,6 +83,10 @@ export class WebRTCSoftphone {
         displayName: this.config.displayName || this.config.username,
         delegate: {
           onInvite: (invitation: Invitation) => this.handleIncomingCall(invitation),
+          onTransportError: (error: Error) => {
+            console.error('WebRTC Transport Error:', error)
+            throw new Error(`WebSocket connection failed: ${error.message}. Check: 1) Port 8089 is open, 2) Asterisk WebRTC transport is running, 3) Firewall allows 8089/tcp`)
+          },
         },
         logLevel: 'warn', // Reduce console spam
       }

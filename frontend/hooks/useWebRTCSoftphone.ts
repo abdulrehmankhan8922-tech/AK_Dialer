@@ -49,61 +49,82 @@ export function useWebRTCSoftphone(options: UseWebRTCSoftphoneOptions = {}): Use
   const [error, setError] = useState<string | null>(null)
   const softphoneRef = useRef<WebRTCSoftphone | null>(null)
 
-  // Get agent info from localStorage
+  // Initialize softphone when credentials are available
   useEffect(() => {
-    if (!enabled || !username || !password) {
+    if (!enabled) return
+    
+    // Determine username and password
+    let finalUsername = username
+    let finalPassword = password
+    
+    // If not provided, try to get from localStorage
+    if (!finalUsername || !finalPassword) {
       const agentData = localStorage.getItem('agent_data')
       if (agentData) {
         try {
           const data = JSON.parse(agentData)
-          if (data.phone_extension && !username) {
-            // Auto-configure from agent data
-            const config: SoftphoneConfig = {
-              server: server,
-              username: data.phone_extension,
-              password: password || 'password123', // Default password
-              displayName: data.full_name || data.username,
-            }
-            
-            if (!softphoneRef.current) {
-              softphoneRef.current = new WebRTCSoftphone(config, (state) => {
-                setCallState(state)
-              })
-            }
+          if (data.phone_extension && !finalUsername) {
+            finalUsername = data.phone_extension
+          }
+          if (!finalPassword) {
+            finalPassword = 'password123' // Default password
           }
         } catch (e) {
           console.error('Error parsing agent data:', e)
         }
       }
     }
-  }, [enabled, username, password, server])
-
-  // Auto-connect when enabled and credentials available
-  useEffect(() => {
-    if (enabled && softphoneRef.current && !callState.isRegistered) {
-      connect().catch((err) => {
-        console.error('Auto-connect failed:', err)
-        setError(err.message || 'Failed to connect WebRTC softphone')
+    
+    // Create softphone instance if we have credentials
+    if (finalUsername && finalPassword && !softphoneRef.current) {
+      console.log('Initializing WebRTC softphone:', { username: finalUsername, server })
+      const config: SoftphoneConfig = {
+        server: server,
+        username: finalUsername,
+        password: finalPassword,
+        displayName: displayName || finalUsername,
+      }
+      
+      softphoneRef.current = new WebRTCSoftphone(config, (state) => {
+        setCallState(state)
       })
     }
-
-    return () => {
-      if (softphoneRef.current) {
-        disconnect().catch(console.error)
-      }
-    }
-  }, [enabled])
+  }, [enabled, username, password, server, displayName])
 
   const connect = useCallback(async () => {
+    // Ensure softphone is initialized
     if (!softphoneRef.current) {
-      if (!username || !password) {
-        throw new Error('Username and password required')
+      // Try to get credentials
+      let finalUsername = username
+      let finalPassword = password
+      
+      if (!finalUsername || !finalPassword) {
+        const agentData = localStorage.getItem('agent_data')
+        if (agentData) {
+          try {
+            const data = JSON.parse(agentData)
+            if (data.phone_extension && !finalUsername) {
+              finalUsername = data.phone_extension
+            }
+            if (!finalPassword) {
+              finalPassword = 'password123'
+            }
+          } catch (e) {
+            console.error('Error parsing agent data:', e)
+          }
+        }
       }
+      
+      if (!finalUsername || !finalPassword) {
+        throw new Error('Username and password required for WebRTC')
+      }
+      
+      console.log('Creating WebRTC softphone instance:', { username: finalUsername, server })
       const config: SoftphoneConfig = {
         server,
-        username,
-        password,
-        displayName,
+        username: finalUsername,
+        password: finalPassword,
+        displayName: displayName || finalUsername,
       }
       softphoneRef.current = new WebRTCSoftphone(config, (state) => {
         setCallState(state)
@@ -112,6 +133,7 @@ export function useWebRTCSoftphone(options: UseWebRTCSoftphoneOptions = {}): Use
 
     try {
       setError(null)
+      console.log('Attempting WebRTC connection...')
       await softphoneRef.current.connect()
     } catch (err: any) {
       const errorMsg = err.message || 'Connection failed'
@@ -124,6 +146,7 @@ export function useWebRTCSoftphone(options: UseWebRTCSoftphoneOptions = {}): Use
   const disconnect = useCallback(async () => {
     if (softphoneRef.current) {
       try {
+        setError(null)
         await softphoneRef.current.disconnect()
         softphoneRef.current = null
       } catch (err: any) {
@@ -131,6 +154,24 @@ export function useWebRTCSoftphone(options: UseWebRTCSoftphoneOptions = {}): Use
       }
     }
   }, [])
+
+  // Auto-connect when enabled
+  useEffect(() => {
+    if (enabled && !callState.isRegistered) {
+      // Try to connect - connect() will create softphone if needed
+      console.log('Auto-connecting WebRTC...', { enabled, registered: callState.isRegistered, hasSoftphone: !!softphoneRef.current })
+      connect().catch((err) => {
+        console.error('Auto-connect failed:', err)
+        setError(err.message || 'Failed to connect WebRTC softphone')
+      })
+    }
+
+    return () => {
+      if (softphoneRef.current && callState.isRegistered) {
+        disconnect().catch(console.error)
+      }
+    }
+  }, [enabled, callState.isRegistered, connect, disconnect])
 
   const dial = useCallback(async (phoneNumber: string) => {
     if (!softphoneRef.current) {

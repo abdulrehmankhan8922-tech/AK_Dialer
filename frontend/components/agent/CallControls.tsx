@@ -42,15 +42,31 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
     disconnect: webrtcDisconnect,
     error: webrtcError,
   } = useWebRTCSoftphone({
-    enabled: useWebRTC && !!agentInfo,
+    enabled: useWebRTC, // Always enable if checkbox is checked, hook will get username from localStorage if needed
     server: (typeof window !== 'undefined' ? process.env.NEXT_PUBLIC_WEBRTC_SERVER : null) || 'ws://101.50.86.185:8089/ws',
-    username: agentInfo?.phone_extension,
+    username: agentInfo?.phone_extension, // Will fallback to localStorage if not available
     password: 'password123', // TODO: Get from secure storage
   })
+  
+  // Debug logging
+  useEffect(() => {
+    console.log('WebRTC Hook State:', {
+      useWebRTC,
+      agentInfo: !!agentInfo,
+      extension: agentInfo?.phone_extension,
+      connected: webrtcConnected,
+      error: webrtcError
+    })
+  }, [useWebRTC, agentInfo, webrtcConnected, webrtcError])
 
   // Auto-connect WebRTC when agent info is loaded
   useEffect(() => {
     if (useWebRTC && agentInfo && !webrtcConnected) {
+      console.log('CallControls: Attempting WebRTC connection', { 
+        extension: agentInfo.phone_extension, 
+        useWebRTC, 
+        connected: webrtcConnected 
+      })
       webrtcConnect().catch((err) => {
         console.error('WebRTC auto-connect failed:', err)
       })
@@ -60,7 +76,7 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
         webrtcDisconnect().catch(console.error)
       }
     }
-  }, [useWebRTC, agentInfo, webrtcConnected])
+  }, [useWebRTC, agentInfo, webrtcConnected, webrtcConnect, webrtcDisconnect])
 
   const handleManualDial = async () => {
     if (!manualDialNumber.trim()) {

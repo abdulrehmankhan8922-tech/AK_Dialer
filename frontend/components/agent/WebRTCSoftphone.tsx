@@ -29,13 +29,13 @@ export default function WebRTCSoftphone({
     disconnect,
     error,
   } = useWebRTCSoftphone({
-    enabled: true,
+    enabled: !!agentExtension, // Only enable if we have an extension
     server: server,
     username: agentExtension,
     password: agentPassword || 'password123',
   })
 
-  // Auto-connect when component mounts
+  // Auto-connect when component mounts (only if we have credentials)
   useEffect(() => {
     if (agentExtension && !isConnected) {
       connect().catch((err) => {
@@ -48,7 +48,7 @@ export default function WebRTCSoftphone({
         disconnect().catch(console.error)
       }
     }
-  }, [agentExtension, isConnected])
+  }, [agentExtension, isConnected, connect, disconnect])
 
   // Notify parent of call state changes
   useEffect(() => {
