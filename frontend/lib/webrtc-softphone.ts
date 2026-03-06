@@ -69,10 +69,14 @@ export class WebRTCSoftphone {
       
       // Create WebRTC user agent
       // SIP.js will auto-detect browser environment and use WebRTC
+      console.log(`Connecting to WebRTC server: ${this.config.server}`)
+      console.log(`Username: ${this.config.username}, Domain: ${domain}`)
+      
       const userAgentOptions: any = {
         uri: userURI,
         transportOptions: {
           server: this.config.server,
+          connectionTimeout: 10, // 10 seconds timeout
         },
         authorizationUsername: this.config.username,
         authorizationPassword: this.config.password,
@@ -80,6 +84,7 @@ export class WebRTCSoftphone {
         delegate: {
           onInvite: (invitation: Invitation) => this.handleIncomingCall(invitation),
         },
+        logLevel: 'warn', // Reduce console spam
       }
 
       this.userAgent = new UserAgent(userAgentOptions)
@@ -96,18 +101,28 @@ export class WebRTCSoftphone {
 
       // Start user agent
       await this.userAgent.start()
+      console.log('WebRTC UserAgent started, attempting registration...')
 
-      // Register
-      await this.registerer.register()
-
+      // Register with timeout
+      const registerPromise = this.registerer.register()
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Registration timeout after 10 seconds')), 10000)
+      )
+      
+      await Promise.race([registerPromise, timeoutPromise])
       console.log('WebRTC Softphone connected and registered')
     } catch (error: any) {
       const errorMsg = error.message || String(error)
       console.error('Error connecting WebRTC softphone:', errorMsg)
+      console.error('Full error:', error)
       
       // Provide helpful error messages
-      if (errorMsg.includes('WebSocket') || errorMsg.includes('1006')) {
-        throw new Error('WebRTC connection failed. Check: 1) Asterisk WebRTC transport configured, 2) Port 8089 open, 3) Firewall allows 8089/tcp')
+      if (errorMsg.includes('WebSocket') || errorMsg.includes('1006') || errorMsg.includes('ECONNREFUSED')) {
+        throw new Error('WebRTC connection failed. Check: 1) Asterisk WebRTC transport configured, 2) Port 8089 open, 3) Firewall allows 8089/tcp, 4) Check browser console for details')
+      }
+      
+      if (errorMsg.includes('timeout')) {
+        throw new Error('WebRTC connection timeout. Check: 1) Port 8089 accessible, 2) Firewall allows 8089/tcp, 3) Asterisk is running')
       }
       
       throw error
