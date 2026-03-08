@@ -7,8 +7,15 @@ router = APIRouter()
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
+async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates"""
+    # Accept the WebSocket connection first (required by FastAPI)
+    await websocket.accept()
+    
+    # Extract token from query parameters
+    query_params = dict(websocket.query_params)
+    token = query_params.get("token")
+    
     if not token:
         await websocket.close(code=1008, reason="Authentication required")
         return
@@ -26,7 +33,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
         await websocket.close(code=1008, reason="Invalid token")
         return
     
-    # Connect
+    # Connect to WebSocket manager
     await websocket_manager.connect(websocket, agent_id, session_id)
     
     try:
@@ -55,3 +62,10 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
     except WebSocketDisconnect:
         websocket_manager.disconnect(agent_id)
         print(f"Agent {agent_id} disconnected")
+    except Exception as e:
+        print(f"WebSocket error for agent {agent_id}: {e}")
+        websocket_manager.disconnect(agent_id)
+        try:
+            await websocket.close(code=1011, reason="Internal error")
+        except:
+            pass

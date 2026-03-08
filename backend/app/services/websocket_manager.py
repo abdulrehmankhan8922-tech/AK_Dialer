@@ -12,7 +12,7 @@ class WebSocketManager:
         self.agent_sessions: Dict[int, str] = {}  # agent_id -> session_id
 
     async def connect(self, websocket: WebSocket, agent_id: int, session_id: str):
-        await websocket.accept()
+        # Note: websocket.accept() should be called before this method
         self.active_connections[agent_id] = websocket
         self.agent_sessions[agent_id] = session_id
 
