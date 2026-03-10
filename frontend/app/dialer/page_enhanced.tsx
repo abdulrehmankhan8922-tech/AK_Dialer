@@ -158,11 +158,9 @@ export default function DialerPage() {
         await agentsAPI.getMe()
         
         const campaignsList = await campaignsAPI.list()
-        setCampaigns(campaignsList.campaigns || campaignsList)
+        setCampaigns(campaignsList)
         
-        if (campaignsList.campaigns && campaignsList.campaigns.length > 0 && !selectedCampaignId) {
-          setSelectedCampaignId(campaignsList.campaigns[0].id)
-        } else if (Array.isArray(campaignsList) && campaignsList.length > 0 && !selectedCampaignId) {
+        if (Array.isArray(campaignsList) && campaignsList.length > 0 && !selectedCampaignId) {
           setSelectedCampaignId(campaignsList[0].id)
         }
 
