@@ -45,36 +45,6 @@ async def create_contact(contact: ContactCreate, db: Session = Depends(get_db)):
     return ContactResponse.model_validate(db_contact)
 
 
-@router.put("/{contact_id}", response_model=ContactResponse)
-async def update_contact(
-    contact_id: int,
-    contact_update: ContactUpdate,
-    db: Session = Depends(get_db),
-    agent_id: int = Depends(get_current_agent_id)
-):
-    """Update contact information"""
-    contact = db.query(Contact).filter(Contact.id == contact_id).first()
-    if not contact:
-        raise HTTPException(status_code=404, detail="Contact not found")
-    
-    update_data = contact_update.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(contact, field, value)
-    
-    db.commit()
-    db.refresh(contact)
-    return ContactResponse.from_orm(contact)
-
-
-@router.get("/{contact_id}", response_model=ContactResponse)
-async def get_contact(contact_id: int, db: Session = Depends(get_db)):
-    """Get contact by ID"""
-    contact = db.query(Contact).filter(Contact.id == contact_id).first()
-    if not contact:
-        raise HTTPException(status_code=404, detail="Contact not found")
-    return ContactResponse.from_orm(contact)
-
-
 @router.post("/import", response_model=dict)
 async def import_contacts(
     file: UploadFile = File(...),
@@ -240,7 +210,7 @@ async def get_next_contact(
     db: Session = Depends(get_db),
     agent_id: int = Depends(get_current_agent_id)
 ):
-    """Get next available contact to dial (status = NEW, not DO_NOT_CALL)"""
+    """Get next available contact to dial (excludes FAILED, CONTACTED, DO_NOT_CALL)"""
     from app.models.agent import Agent
     
     # Get agent's campaign if campaign_id not provided
@@ -248,9 +218,11 @@ async def get_next_contact(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Build query for next contact
+    # Build query for next contact - only NEW contacts (one attempt per contact)
+    # Exclude: FAILED, CONTACTED, DO_NOT_CALL, NOT_ANSWERED, BUSY (all failures go to failed list)
+    # Rule: Each contact is dialed ONCE only
     query = db.query(Contact).filter(
-        Contact.status == ContactStatus.NEW.value,
+        Contact.status == ContactStatus.NEW.value,  # Only NEW contacts - one attempt only
         Contact.status != ContactStatus.DO_NOT_CALL.value
     )
     
@@ -260,8 +232,11 @@ async def get_next_contact(
     elif hasattr(agent, 'campaign_id') and agent.campaign_id:
         query = query.filter(Contact.campaign_id == agent.campaign_id)
     
-    # Get oldest NEW contact (first in, first out)
-    contact = query.order_by(Contact.created_at.asc()).first()
+    # Get oldest contact (first in, first out) - prioritize NEW over retries
+    contact = query.order_by(
+        Contact.status.asc(),  # NEW first, then NOT_ANSWERED, then BUSY
+        Contact.created_at.asc()
+    ).first()
     
     if not contact:
         return None
@@ -269,23 +244,54 @@ async def get_next_contact(
     return ContactResponse.model_validate(contact)
 
 
-@router.get("/dialed", response_model=List[ContactResponse])
-async def get_dialed_contacts(
+@router.get("/active", response_model=List[ContactResponse])
+async def get_active_contacts(
     campaign_id: Optional[int] = Query(None),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(500, ge=1, le=1000),
     db: Session = Depends(get_db),
     agent_id: int = Depends(get_current_agent_id)
 ):
-    """Get all dialed contacts (contacts that have been dialed at least once)"""
+    """Get active contacts (NEW, NOT_ANSWERED, BUSY) - contacts available for dialing"""
     from app.models.agent import Agent
     
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Build query for dialed contacts
+    # Build query for active contacts (dialable) - only NEW contacts
+    # Rule: One attempt per contact - NOT_ANSWERED and BUSY are now considered failures
     query = db.query(Contact).filter(
-        Contact.last_dialed_at.isnot(None)
+        Contact.status == ContactStatus.NEW.value,  # Only NEW contacts available for dialing
+        Contact.status != ContactStatus.DO_NOT_CALL.value
+    )
+    
+    # Filter by campaign if provided
+    if campaign_id:
+        query = query.filter(Contact.campaign_id == campaign_id)
+    
+    # Order by oldest first (FIFO)
+    contacts = query.order_by(Contact.created_at.asc()).limit(limit).all()
+    
+    return [ContactResponse.model_validate(contact) for contact in contacts]
+
+
+@router.get("/dialed", response_model=List[ContactResponse])
+async def get_dialed_contacts(
+    campaign_id: Optional[int] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Get successfully dialed contacts (status = CONTACTED)"""
+    from app.models.agent import Agent
+    
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Build query for successfully contacted contacts
+    query = db.query(Contact).filter(
+        Contact.status == ContactStatus.CONTACTED.value
     )
     
     # Filter by campaign if provided
@@ -296,3 +302,97 @@ async def get_dialed_contacts(
     contacts = query.order_by(Contact.last_dialed_at.desc()).limit(limit).all()
     
     return [ContactResponse.model_validate(contact) for contact in contacts]
+
+
+@router.get("/failed", response_model=List[ContactResponse])
+async def get_failed_contacts(
+    campaign_id: Optional[int] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Get failed contacts (status = FAILED) - archived contacts"""
+    from app.models.agent import Agent
+    
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Build query for failed contacts
+    query = db.query(Contact).filter(
+        Contact.status == ContactStatus.FAILED.value
+    )
+    
+    # Filter by campaign if provided
+    if campaign_id:
+        query = query.filter(Contact.campaign_id == campaign_id)
+    
+    # Order by most recently failed first
+    contacts = query.order_by(Contact.last_dialed_at.desc()).limit(limit).all()
+    
+    return [ContactResponse.model_validate(contact) for contact in contacts]
+
+
+@router.post("/{contact_id}/reactivate", response_model=ContactResponse)
+async def reactivate_contact(
+    contact_id: int,
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Re-activate a failed contact (move back to NEW status)"""
+    from app.models.agent import Agent
+    
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    
+    # Only allow reactivating failed contacts
+    if contact.status != ContactStatus.FAILED.value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reactivate contact with status: {contact.status}. Only FAILED contacts can be reactivated."
+        )
+    
+    # Reset to NEW status
+    contact.status = ContactStatus.NEW
+    contact.dial_attempts = 0  # Reset attempts
+    contact.last_dialed_at = None  # Clear last dialed time
+    
+    db.commit()
+    db.refresh(contact)
+    
+    return ContactResponse.model_validate(contact)
+
+
+@router.put("/{contact_id}", response_model=ContactResponse)
+async def update_contact(
+    contact_id: int,
+    contact_update: ContactUpdate,
+    db: Session = Depends(get_db),
+    agent_id: int = Depends(get_current_agent_id)
+):
+    """Update contact information"""
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    
+    update_data = contact_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(contact, field, value)
+    
+    db.commit()
+    db.refresh(contact)
+    return ContactResponse.model_validate(contact)
+
+
+@router.get("/{contact_id}", response_model=ContactResponse)
+async def get_contact(contact_id: int, db: Session = Depends(get_db)):
+    """Get contact by ID"""
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return ContactResponse.model_validate(contact)

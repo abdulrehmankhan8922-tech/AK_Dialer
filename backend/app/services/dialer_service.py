@@ -24,8 +24,18 @@ class DialerService:
         contact_id: Optional[int] = None
     ) -> Dict:
         """
-        Initiate a call via Asterisk
-        This uses agent-first dialing: calls agent, then bridges to customer
+        Initiate a call via Asterisk - CUSTOMER-FIRST DIALING (Vicidial Style)
+        
+        Flow:
+        1. Dial customer's number through trunk
+        2. When customer answers, bridge to agent's softphone
+        3. Agent's softphone receives call (audio only)
+        4. All controls remain in web dialer
+        
+        This matches the Vicidial workflow where:
+        - Softphone is registered but only handles audio
+        - All call controls are in the web dialer
+        - Customer gets call immediately (not agent first)
         """
         call_unique_id = str(uuid.uuid4())
         
@@ -35,40 +45,35 @@ class DialerService:
                 return await self._mock_call(call_unique_id, phone_number, agent_extension)
             else:
                 # Register call in channel tracker
+                from app.services.channel_tracker import channel_tracker
                 channel_tracker.register_call(call_unique_id)
                 
-                # Real Asterisk call using agent-first dialing
-                # Step 1: Originate call to agent extension first
-                # The dialplan should then dial the customer number
-                
-                # Customer channel format: SIP/trunk_name/phone_number
-                customer_channel = f"{settings.ASTERISK_TRUNK}/{phone_number}"
+                # Customer-First Dialing: Dial customer through trunk, then bridge to agent
+                # Customer channel format: PJSIP/trunk/sip:{phone_number}@10.50.161.239
+                # This matches the dialplan format in extensions.conf
+                customer_channel = f"{settings.ASTERISK_TRUNK}/sip:{phone_number}@10.50.161.239"
                 
                 # Variables to pass to the call
                 variables = {
                     'CALLERID(num)': phone_number,
-                    'CALLERID(name)': f'Agent {agent_extension}',
+                    'CALLERID(name)': f'Dialer',
                     'CALL_UNIQUE_ID': call_unique_id,
                     'CAMPAIGN_ID': str(campaign_id) if campaign_id else '',
                     'CONTACT_ID': str(contact_id) if contact_id else '',
                     'CUSTOMER_NUMBER': phone_number,
-                    'CUSTOMER_CHANNEL': customer_channel
+                    'CUSTOMER_CHANNEL': customer_channel,
+                    'AGENT_EXTENSION': agent_extension  # Pass agent extension to dialplan
                 }
                 
-                # For agent-first dialing, we originate to the agent extension
-                # The dialplan at that extension should handle dialing the customer
-                # Alternative: Use Local channel to dial both
-                
-                # Using Local channel for better control:
-                # Local/agent_ext@agent_context -> dials agent
-                # Then dials customer when agent answers
-                local_channel = f"Local/{agent_extension}@{settings.ASTERISK_CONTEXT}"
-                
-                # Originate call: This will ring agent first, then dial customer
+                # Originate call using dialplan method:
+                # - Channel: Customer number through trunk (PJSIP/trunk/{number})
+                # - Context: from-internal (our dialplan context)
+                # - Exten: Agent extension (dialplan will use this to bridge to agent)
+                # - Dialplan will: Dial customer first, then bridge to agent when answered
                 result = await self.asterisk_service.originate_call(
-                    channel=customer_channel,  # Customer number to dial
-                    context=settings.ASTERISK_CONTEXT,
-                    exten=agent_extension,  # Agent extension to connect to
+                    channel=customer_channel,  # Customer number to dial first
+                    context=settings.ASTERISK_CONTEXT,  # from-internal
+                    exten=agent_extension,  # Agent extension (dialplan uses this to bridge)
                     priority=1,
                     caller_id=f"Dialer <{phone_number}>",
                     timeout=30000,
@@ -115,32 +120,73 @@ class DialerService:
         }
 
     async def hangup_call(self, call_unique_id: str) -> bool:
-        """Hangup a call by call_unique_id or channel name"""
+        """Hangup a call by call_unique_id or channel name - with multiple fallback methods"""
         try:
             if settings.USE_MOCK_DIALER:
                 return True
             else:
-                # Try to get channels from tracker
+                # Method 1: Try to get channels from tracker
                 channels = channel_tracker.get_call_channels(call_unique_id)
                 
                 if channels:
                     # Hangup both channels if they exist
-                    success = True
+                    success = False
                     if channels.get('agent_channel'):
-                        agent_result = await self.asterisk_service.hangup_call(channels['agent_channel'])
-                        success = success and agent_result
+                        try:
+                            agent_result = await self.asterisk_service.hangup_call(channels['agent_channel'])
+                            success = success or agent_result
+                        except Exception as e:
+                            logger.warning(f"Failed to hangup agent channel {channels['agent_channel']}: {e}")
                     if channels.get('customer_channel'):
-                        customer_result = await self.asterisk_service.hangup_call(channels['customer_channel'])
-                        success = success and customer_result
-                    return success
-                else:
-                    # Fallback: assume channel is passed directly
-                    if not call_unique_id.startswith('SIP/') and not call_unique_id.startswith('Local/'):
-                        # Assume it's a call_unique_id but not found in tracker
-                        logger.warning(f"Call {call_unique_id} not found in channel tracker")
-                        return False
-                    # Direct channel hangup
-                    return await self.asterisk_service.hangup_call(call_unique_id)
+                        try:
+                            customer_result = await self.asterisk_service.hangup_call(channels['customer_channel'])
+                            success = success or customer_result
+                        except Exception as e:
+                            logger.warning(f"Failed to hangup customer channel {channels['customer_channel']}: {e}")
+                    if success:
+                        return True
+                
+                # Method 2: Try direct channel hangup if call_unique_id looks like a channel
+                if call_unique_id.startswith('SIP/') or call_unique_id.startswith('Local/') or call_unique_id.startswith('PJSIP/'):
+                    try:
+                        return await self.asterisk_service.hangup_call(call_unique_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to hangup channel directly {call_unique_id}: {e}")
+                
+                # Method 3: Try to find channels from database
+                from app.core.database import SessionLocal
+                from app.models.call import Call
+                db = SessionLocal()
+                try:
+                    call = db.query(Call).filter(Call.call_unique_id == call_unique_id).first()
+                    if call:
+                        success = False
+                        if call.agent_channel:
+                            try:
+                                result = await self.asterisk_service.hangup_call(call.agent_channel)
+                                success = success or result
+                            except Exception as e:
+                                logger.warning(f"Failed to hangup agent channel from DB {call.agent_channel}: {e}")
+                        if call.customer_channel:
+                            try:
+                                result = await self.asterisk_service.hangup_call(call.customer_channel)
+                                success = success or result
+                            except Exception as e:
+                                logger.warning(f"Failed to hangup customer channel from DB {call.customer_channel}: {e}")
+                        if call.freeswitch_channel:
+                            try:
+                                result = await self.asterisk_service.hangup_call(call.freeswitch_channel)
+                                success = success or result
+                            except Exception as e:
+                                logger.warning(f"Failed to hangup freeswitch channel from DB {call.freeswitch_channel}: {e}")
+                        if success:
+                            return True
+                finally:
+                    db.close()
+                
+                # If all methods failed, log warning but don't fail completely
+                logger.warning(f"Could not hangup call {call_unique_id} - all methods failed")
+                return False
         except Exception as e:
             logger.error(f"Error hanging up call: {e}", exc_info=True)
             return False

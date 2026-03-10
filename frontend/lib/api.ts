@@ -199,16 +199,20 @@ export const campaignsAPI = {
 }
 
 export const callsAPI = {
-  dial: async (phone_number: string, campaign_id?: number, contact_id?: number): Promise<Call> => {
+  dial: async (phone_number: string, campaign_id?: number, contact_id?: number, softphone_dial?: boolean): Promise<Call> => {
     const response = await api.post<Call>('/api/calls/dial', {
       phone_number,
-      campaign_id,
-      contact_id,
+      campaign_id: softphone_dial ? null : campaign_id,
+      contact_id: softphone_dial ? null : contact_id,
+      softphone_dial: softphone_dial || false,
     })
     return response.data
   },
   hangup: async (call_id: number): Promise<void> => {
     await api.post(`/api/calls/hangup/${call_id}`)
+  },
+  forceClear: async (call_id: number): Promise<void> => {
+    await api.post(`/api/calls/force-clear/${call_id}`)
   },
   transfer: async (call_id: number, target_extension: string): Promise<void> => {
     await api.post(`/api/calls/transfer/${call_id}`, null, {
@@ -304,10 +308,26 @@ export const contactsAPI = {
     const response = await api.get<Contact | null>('/api/contacts/next', { params })
     return response.data
   },
-  getDialed: async (campaign_id?: number, limit: number = 50): Promise<Contact[]> => {
+  getActive: async (campaign_id?: number, limit: number = 500): Promise<Contact[]> => {
+    const params: any = { limit }
+    if (campaign_id) params.campaign_id = campaign_id
+    const response = await api.get<Contact[]>('/api/contacts/active', { params })
+    return response.data
+  },
+  getDialed: async (campaign_id?: number, limit: number = 100): Promise<Contact[]> => {
     const params: any = { limit }
     if (campaign_id) params.campaign_id = campaign_id
     const response = await api.get<Contact[]>('/api/contacts/dialed', { params })
+    return response.data
+  },
+  getFailed: async (campaign_id?: number, limit: number = 100): Promise<Contact[]> => {
+    const params: any = { limit }
+    if (campaign_id) params.campaign_id = campaign_id
+    const response = await api.get<Contact[]>('/api/contacts/failed', { params })
+    return response.data
+  },
+  reactivate: async (contact_id: number): Promise<Contact> => {
+    const response = await api.post<Contact>(`/api/contacts/${contact_id}/reactivate`)
     return response.data
   },
 }

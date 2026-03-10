@@ -1,20 +1,41 @@
 'use client'
 
-import { useState } from 'react'
-import { callsAPI } from '@/lib/api'
+import { useState, useEffect } from 'react'
+import { callsAPI, contactsAPI } from '@/lib/api'
 import TransferModal from './TransferModal'
-import type { Call } from '@/lib/api'
+import type { Call, Campaign } from '@/lib/api'
 
 interface CallControlsProps {
   currentCall: Call | null
   onCallUpdate: () => void
   onStatsUpdate: () => void
+  campaigns?: Campaign[]
+  selectedCampaignId?: number | null
+  onCampaignSelect?: (campaignId: number | null) => void
+  onDialNext?: () => void
 }
 
-export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate }: CallControlsProps) {
+export default function CallControls({ 
+  currentCall, 
+  onCallUpdate, 
+  onStatsUpdate,
+  campaigns = [],
+  selectedCampaignId,
+  onCampaignSelect,
+  onDialNext
+}: CallControlsProps) {
   const [manualDialNumber, setManualDialNumber] = useState('')
   const [loading, setLoading] = useState(false)
   const [showTransferModal, setShowTransferModal] = useState(false)
+  const [dialingStatus, setDialingStatus] = useState('')
+
+  // Clear manual dial number when call ends (but keep it during call to show the dialed number)
+  useEffect(() => {
+    if (!currentCall) {
+      // Clear the input when call ends
+      setManualDialNumber('')
+    }
+  }, [currentCall])
 
   const handleManualDial = async () => {
     if (!manualDialNumber.trim()) {
@@ -34,6 +55,7 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
     }
   }
 
+
   const handleHangup = async () => {
     if (!currentCall) return
 
@@ -49,14 +71,22 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
       setTimeout(() => {
         onCallUpdate()
       }, 500)
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error hanging up:', error)
       // Even on error, try to refresh to clear stuck state
+      // The backend now always marks call as ended, so this should work
       onCallUpdate()
+      onStatsUpdate()
       // Force clear after error
       setTimeout(() => {
         onCallUpdate()
       }, 500)
+      
+      // Show success message even if there was an error
+      // (backend marks call as ended regardless)
+      if (error.response?.status !== 404) {
+        alert('Call has been cleared. If it was stuck, it should now be hung up.')
+      }
     } finally {
       setLoading(false)
     }
@@ -128,14 +158,39 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
       return
     }
 
+    if (!selectedCampaignId) {
+      alert('Please select a campaign first')
+      return
+    }
+
+    if (onDialNext) {
+      onDialNext()
+      return
+    }
+
     setLoading(true)
+    setDialingStatus('Getting next contact...')
     try {
-      await callsAPI.dialNext()
+      const nextContact = await contactsAPI.getNext(selectedCampaignId)
+      if (!nextContact) {
+        setDialingStatus('')
+        alert('No more contacts available in this campaign')
+        setLoading(false)
+        return
+      }
+
+      // Show the number in the input field before dialing
+      setManualDialNumber(nextContact.phone)
+      setDialingStatus(`Dialing ${nextContact.phone}...`)
+      await callsAPI.dial(nextContact.phone, selectedCampaignId, nextContact.id)
+      setDialingStatus('')
+      // The input will now show currentCall.phone_number automatically
       onCallUpdate()
       onStatsUpdate()
     } catch (error: any) {
-      const errorMsg = error.response?.data?.detail || 'No more contacts available'
-      alert(errorMsg)
+      setDialingStatus('')
+      setManualDialNumber('') // Clear on error
+      alert(error.response?.data?.detail || 'Error making call')
     } finally {
       setLoading(false)
     }
@@ -153,6 +208,14 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
       )}
       
       <div className="space-y-5">
+      {/* Dialing Status */}
+      {dialingStatus && (
+        <div className="bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300 px-4 py-3 rounded-lg text-center font-medium">
+          <span className="w-2 h-2 bg-yellow-600 rounded-full animate-pulse mr-2 inline-block"></span>
+          {dialingStatus}
+        </div>
+      )}
+
       {/* Manual Dial */}
       <div className="space-y-2">
         <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
@@ -161,11 +224,17 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
         <div className="flex space-x-3">
           <input
             type="text"
-            value={manualDialNumber}
-            onChange={(e) => setManualDialNumber(e.target.value)}
+            value={currentCall?.phone_number || manualDialNumber}
+            onChange={(e) => {
+              // Only allow editing when there's no active call
+              if (!currentCall) {
+                setManualDialNumber(e.target.value)
+              }
+            }}
             placeholder="Enter phone number"
-            className="flex-1 px-4 py-2.5 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+            className="flex-1 px-4 py-2.5 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all disabled:bg-slate-100 dark:disabled:bg-slate-800 disabled:cursor-not-allowed"
             disabled={loading || !!currentCall}
+            readOnly={!!currentCall}
           />
           <button
             onClick={handleManualDial}
@@ -256,6 +325,37 @@ export default function CallControls({ currentCall, onCallUpdate, onStatsUpdate 
           </svg>
           <span>Hangup Call</span>
         </button>
+        
+        {currentCall && (
+          <button
+            onClick={async () => {
+              if (!currentCall) return
+              if (!confirm('Force clear this stuck call? This will mark it as ended without hanging up via Asterisk.')) return
+              
+              setLoading(true)
+              try {
+                await callsAPI.forceClear(currentCall.id)
+                onCallUpdate()
+                onStatsUpdate()
+                setTimeout(() => {
+                  onCallUpdate()
+                }, 500)
+              } catch (error: any) {
+                alert(error.response?.data?.detail || 'Error force clearing call')
+              } finally {
+                setLoading(false)
+              }
+            }}
+            disabled={loading || !currentCall}
+            className="col-span-2 px-4 py-3 rounded-lg bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-50 flex items-center justify-center space-x-2 font-medium transition-colors shadow-sm"
+            title="Force clear stuck call (use if hangup doesn't work)"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+            <span>Force Clear Stuck Call</span>
+          </button>
+        )}
       </div>
       </div>
     </>

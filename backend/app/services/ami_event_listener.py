@@ -548,6 +548,46 @@ class AMIEventListener:
                 # Track ring time (when call starts ringing)
                 if new_status == CallStatus.RINGING and not call.ring_time:
                     call.ring_time = datetime.now(timezone.utc)
+                    logger.info(f"Call {call_unique_id} started ringing at {call.ring_time}")
+                
+                # Check if call has been ringing for more than 60 seconds (max ring time)
+                if new_status == CallStatus.RINGING and call.ring_time:
+                    ring_duration = (datetime.now(timezone.utc) - call.ring_time).total_seconds()
+                    if ring_duration > 60:
+                        logger.warning(f"Call {call_unique_id} has been ringing for {ring_duration}s (>60s), marking as failed")
+                        call.status = CallStatus.NO_ANSWER.value
+                        call.end_time = datetime.now(timezone.utc)
+                        if call.start_time:
+                            call.duration = int((call.end_time - call.start_time).total_seconds())
+                        call.ring_duration = int(ring_duration)
+                        # Update contact status to FAILED
+                        if call.contact_id:
+                            from app.models.contact import Contact, ContactStatus
+                            contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+                            if contact:
+                                contact.status = ContactStatus.FAILED
+                                logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (60s ring timeout)")
+                        # Update agent status
+                        if call.agent_id:
+                            agent = db.query(Agent).filter(Agent.id == call.agent_id).first()
+                            if agent:
+                                agent.status = AgentStatus.AVAILABLE.value
+                        db.commit()
+                        # Send WebSocket update
+                        if call.agent_id:
+                            await websocket_manager.send_call_update(call.agent_id, {
+                                "call_id": call.id,
+                                "status": call.status,
+                                "phone_number": call.phone_number
+                            })
+                            await websocket_manager.send_agent_status_update(call.agent_id, "available")
+                        # Try to hangup the call
+                        try:
+                            from app.services.dialer_service import dialer_service
+                            await dialer_service.hangup_call(call.call_unique_id)
+                        except Exception as hangup_error:
+                            logger.warning(f"Failed to hangup timed-out call: {hangup_error}")
+                        return
                 
                 # Track answered time (when call is connected/answered)
                 if new_status == CallStatus.CONNECTED and not call.answered_time:
@@ -556,6 +596,7 @@ class AMIEventListener:
                     if call.ring_time:
                         ring_duration = (call.answered_time - call.ring_time).total_seconds()
                         call.ring_duration = int(ring_duration)
+                        logger.info(f"Call {call_unique_id} answered after {call.ring_duration}s of ringing")
                 
                 # Update agent status
                 if call.agent_id:
@@ -587,7 +628,7 @@ class AMIEventListener:
             db.close()
     
     async def _handle_hangup(self, event: Dict[str, str]):
-        """Handle Hangup event"""
+        """Handle Hangup event - Auto-hangup agent when customer hangs up"""
         channel = event.get('Channel', '')
         uniqueid = event.get('Uniqueid', '')
         cause = event.get('Cause', '')
@@ -606,6 +647,20 @@ class AMIEventListener:
                 channel_tracker.remove_call(call_unique_id)
                 return
             
+            # Check if this is customer channel hanging up - if so, hangup agent channel too
+            channels = channel_tracker.get_call_channels(call_unique_id)
+            is_customer_hangup = False
+            agent_channel = None
+            
+            if channels:
+                customer_channel = channels.get('customer_channel')
+                agent_channel = channels.get('agent_channel')
+                
+                # Check if the hanging channel is the customer channel
+                if customer_channel and (channel == customer_channel or uniqueid == channels.get('customer_uniqueid')):
+                    is_customer_hangup = True
+                    logger.info(f"Customer channel hung up, will auto-hangup agent channel")
+            
             # Update call status
             if call.status not in [CallStatus.ENDED.value, CallStatus.FAILED.value]:
                 call.status = CallStatus.ENDED.value
@@ -619,11 +674,13 @@ class AMIEventListener:
                 # Calculate talk duration (answered to end)
                 if call.answered_time:
                     talk_duration = (call.end_time - call.answered_time).total_seconds()
-                    call.talk_duration = int(talk_duration)
+                    call.talk_duration = int(talk_duration) if talk_duration > 0 else 0
+                    logger.info(f"Call {call_unique_id} talk_duration: {call.talk_duration}s (answered_time: {call.answered_time}, end_time: {call.end_time})")
                 elif call.ring_time and not call.answered_time:
                     # Call ended without being answered - ring duration is from ring to end
                     ring_duration = (call.end_time - call.ring_time).total_seconds()
                     call.ring_duration = int(ring_duration)
+                    logger.info(f"Call {call_unique_id} ended without answer, ring_duration: {call.ring_duration}s")
                 
                 # Map cause codes to call status
                 cause_code = int(cause) if cause.isdigit() else 0
@@ -636,20 +693,30 @@ class AMIEventListener:
                 elif cause_code > 0:
                     call.status = CallStatus.FAILED.value
                 
-                # Update contact status based on call result
+                # Update contact status based on call result (One attempt per contact - Pakistan industry standard)
+                # Rule: Each contact is dialed ONCE
+                # - If successful (answered and talked) → CONTACTED → move to dialed list
+                # - If failed (any failure) → FAILED → move to failed list
+                # - No retries - one attempt only
                 if call.contact_id:
                     from app.models.contact import Contact, ContactStatus
                     contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
                     if contact:
-                        # Update contact status based on final call status
-                        if call.status == CallStatus.ANSWERED.value or call.status == CallStatus.CONNECTED.value:
+                        # CONTACTED = Successfully reached and talked (has answered_time and talk_duration > 0)
+                        # This is the ONLY success case - customer answered and talked
+                        # Check if call was answered and had meaningful talk time (at least 1 second)
+                        if call.answered_time and call.talk_duration is not None and call.talk_duration > 0:
                             contact.status = ContactStatus.CONTACTED
-                        elif call.status == CallStatus.BUSY.value:
-                            contact.status = ContactStatus.BUSY
-                        elif call.status == CallStatus.NO_ANSWER.value:
-                            contact.status = ContactStatus.NOT_ANSWERED
-                        elif call.status == CallStatus.FAILED.value:
+                            logger.info(f"✅ Contact {contact.id} ({contact.phone}) marked as CONTACTED (talk_duration: {call.talk_duration}s) - Moving to dialed list")
+                        # ENDED with talk time = successful contact (redundant check but safe)
+                        elif call.status == CallStatus.ENDED.value and call.answered_time and call.talk_duration is not None and call.talk_duration > 0:
+                            contact.status = ContactStatus.CONTACTED
+                            logger.info(f"✅ Contact {contact.id} ({contact.phone}) marked as CONTACTED (normal end with talk time: {call.talk_duration}s) - Moving to dialed list")
+                        # ALL OTHER CASES = FAILED (one attempt only, no retries)
+                        # This includes: BUSY, NOT_ANSWERED, FAILED, ENDED without answer, short duration, no talk time
+                        else:
                             contact.status = ContactStatus.FAILED
+                            logger.info(f"❌ Contact {contact.id} ({contact.phone}) marked as FAILED (status: {call.status}, answered: {bool(call.answered_time)}, talk_duration: {call.talk_duration}, cause: {cause_txt}) - Moving to failed list (one attempt only)")
                         # Note: contact.last_dialed_at and dial_attempts are updated in dial endpoint
                 
                 # Update agent status
@@ -672,6 +739,24 @@ class AMIEventListener:
                     await websocket_manager.send_agent_status_update(call.agent_id, "available")
                 
                 logger.info(f"Call {call_unique_id} ended: {cause_txt} (Cause: {cause})")
+            
+            # Auto-hangup agent channel if customer hung up
+            if is_customer_hangup and agent_channel:
+                try:
+                    from app.services.asterisk_service import AsteriskService
+                    asterisk_service = AsteriskService()
+                    await asterisk_service.connect()
+                    
+                    # Hangup agent channel
+                    result = await asterisk_service.send_action("Hangup", {"Channel": agent_channel})
+                    if result.get("Response") == "Success":
+                        logger.info(f"Auto-hungup agent channel {agent_channel} after customer hangup")
+                    else:
+                        logger.warning(f"Failed to auto-hangup agent channel: {result.get('Message', 'Unknown error')}")
+                    
+                    await asterisk_service.disconnect()
+                except Exception as hangup_error:
+                    logger.error(f"Error auto-hanging up agent channel: {hangup_error}")
             
             # Clean up tracking
             channel_tracker.remove_call(call_unique_id)

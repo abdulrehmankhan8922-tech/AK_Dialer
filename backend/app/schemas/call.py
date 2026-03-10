@@ -53,6 +53,7 @@ class DialRequest(BaseModel):
     phone_number: str
     campaign_id: Optional[int] = None
     contact_id: Optional[int] = None
+    softphone_dial: bool = False  # If True, dial directly without campaign/contact tracking
 
 
 class CallControlRequest(BaseModel):

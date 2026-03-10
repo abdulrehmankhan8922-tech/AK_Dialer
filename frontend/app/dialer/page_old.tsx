@@ -1,0 +1,551 @@
+'use client'
+
+import { useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+import { authAPI, agentsAPI, callsAPI, statsAPI, campaignsAPI, contactsAPI } from '@/lib/api'
+import { wsManager } from '@/lib/websocket'
+import CallControls from '@/components/agent/CallControls'
+import CustomerInfoForm from '@/components/agent/CustomerInfoForm'
+import StatsDashboard from '@/components/agent/StatsDashboard'
+import CallTimer from '@/components/agent/CallTimer'
+import DispositionCodes from '@/components/agent/DispositionCodes'
+import CallHistory from '@/components/agent/CallHistory'
+import IncomingCallModal from '@/components/agent/IncomingCallModal'
+import WebRTCSoftphone from '@/components/agent/WebRTCSoftphone'
+import DashboardLayout from '@/components/shared/DashboardLayout'
+import type { Call, Stats, Campaign, Contact } from '@/lib/api'
+
+export default function DialerPage() {
+  const router = useRouter()
+  const [agent, setAgent] = useState<any>(null)
+  const [currentCall, setCurrentCall] = useState<Call | null>(null)
+  const [incomingCall, setIncomingCall] = useState<Call | null>(null)
+  const [stats, setStats] = useState<Stats | null>(null)
+  const [campaigns, setCampaigns] = useState<Campaign[]>([])
+  const [sessionInfo, setSessionInfo] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [currentTime, setCurrentTime] = useState(new Date())
+  const [activeTab, setActiveTab] = useState<'dialer' | 'history'>('dialer')
+  const [dialedContacts, setDialedContacts] = useState<Contact[]>([])
+  const [autoDialEnabled, setAutoDialEnabled] = useState(false)
+
+  // Helper function to check if a call is active
+  const isCallActive = (call: Call | null): boolean => {
+    if (!call) return false
+    const endedStatuses = ['ended', 'failed', 'busy', 'no_answer', 'transferred', 'parked']
+    if (endedStatuses.includes(call.status)) return false
+    if (call.end_time) {
+      const endTime = new Date(call.end_time).getTime()
+      const now = Date.now()
+      if (now - endTime > 1000) return false // Ended more than 1 second ago
+    }
+    return true
+  }
+
+  useEffect(() => {
+    const initializeDashboard = async () => {
+      // Check authentication
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        router.push('/login')
+        return
+      }
+
+      // Load agent data
+      const agentData = localStorage.getItem('agent_data')
+      if (agentData) {
+        try {
+          const data = JSON.parse(agentData)
+          setAgent(data)
+          setSessionInfo({
+            session_id: data.session_id,
+            campaign_id: data.campaign_id,
+          })
+        } catch (error) {
+          console.error('Error parsing agent data:', error)
+          router.push('/login')
+          return
+        }
+      }
+
+      try {
+        // Verify token is valid by getting agent info
+        await agentsAPI.getMe()
+        
+        // Load campaigns
+        campaignsAPI.list().then(setCampaigns).catch((err) => {
+          console.error('Error loading campaigns:', err)
+        })
+
+        // Load stats
+        await loadStats()
+
+        // Connect WebSocket
+        if (token) {
+          try {
+            wsManager.connect(token)
+            wsManager.on('call_update', handleCallUpdate)
+            wsManager.on('incoming_call', handleIncomingCall)
+            wsManager.on('stats_update', handleStatsUpdate)
+            wsManager.on('agent_status', handleAgentStatus)
+          } catch (wsError) {
+            console.error('WebSocket connection error:', wsError)
+          }
+        }
+
+        // Update current time every second
+        const timeInterval = setInterval(() => {
+          setCurrentTime(new Date())
+        }, 1000)
+
+        // Load current call
+        loadCurrentCall().catch(console.error)
+
+        // Load dialed contacts
+        loadDialedContacts().catch(console.error)
+
+        // Refresh current call periodically (every 2 seconds)
+        // This ensures we catch any status changes even if WebSocket misses them
+        const callInterval = setInterval(() => {
+          loadCurrentCall().catch(console.error)
+        }, 2000)
+
+        // Refresh stats periodically
+        const statsInterval = setInterval(() => {
+          loadStats().catch(console.error)
+        }, 30000)
+
+        return () => {
+          clearInterval(timeInterval)
+          clearInterval(callInterval)
+          clearInterval(statsInterval)
+          wsManager.off('call_update', handleCallUpdate)
+          wsManager.off('incoming_call', handleIncomingCall)
+          wsManager.off('stats_update', handleStatsUpdate)
+          wsManager.off('agent_status', handleAgentStatus)
+        }
+      } catch (error: any) {
+        console.error('Authentication or initialization error:', error)
+        if (error.response?.status === 401) {
+          localStorage.removeItem('access_token')
+          localStorage.removeItem('agent_data')
+          router.push('/login')
+        } else {
+          setLoading(false)
+        }
+      }
+    }
+
+    initializeDashboard()
+  }, [router])
+
+  // Safety check: Clear ended calls periodically
+  useEffect(() => {
+    if (!currentCall) return
+
+    const checkCallStatus = () => {
+      // Use the helper function to check if call is still active
+      if (!isCallActive(currentCall)) {
+        setCurrentCall(null)
+        loadStats() // Refresh stats when call ends
+      }
+    }
+
+    // Check immediately
+    checkCallStatus()
+
+    // Check every second
+    const interval = setInterval(checkCallStatus, 1000)
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentCall])
+
+  const loadStats = async () => {
+    try {
+      const data = await statsAPI.getToday()
+      setStats(data)
+      setLoading(false)
+    } catch (error: any) {
+      console.error('Error loading stats:', error)
+      if (error.response?.status === 401) {
+        localStorage.removeItem('access_token')
+        localStorage.removeItem('agent_data')
+        router.push('/login')
+      } else {
+        setLoading(false)
+      }
+    }
+  }
+
+  const loadCurrentCall = async () => {
+    try {
+      const call = await callsAPI.getCurrent()
+      // Explicitly clear call if null or if call status is ended/failed
+      if (!call || call.status === 'ended' || call.status === 'failed' || call.status === 'busy' || call.status === 'no_answer') {
+        setCurrentCall(null)
+        return
+      }
+      
+      // Additional safety check: if call has end_time, it's ended
+      if (call.end_time) {
+        const endTime = new Date(call.end_time).getTime()
+        const now = Date.now()
+        // If call ended more than 5 seconds ago, clear it
+        if (now - endTime > 5000) {
+          setCurrentCall(null)
+          return
+        }
+      }
+      
+      setCurrentCall(call)
+    } catch (error) {
+      console.error('Error loading current call:', error)
+      // Clear call on error to prevent stuck state
+      setCurrentCall(null)
+    }
+  }
+
+  const loadDialedContacts = async () => {
+    try {
+      const campaignId = sessionInfo?.campaign_id
+      const contacts = await contactsAPI.getDialed(campaignId, 20)
+      setDialedContacts(contacts)
+    } catch (error) {
+      console.error('Error loading dialed contacts:', error)
+    }
+  }
+
+  const handleAutoDialNext = async (callStatus: string) => {
+    // Auto-dial next if call failed and auto-dial is enabled
+    const failedStatuses = ['busy', 'no_answer', 'failed']
+    if (autoDialEnabled && failedStatuses.includes(callStatus)) {
+      try {
+        // Small delay before dialing next
+        setTimeout(async () => {
+          await callsAPI.dialNext(sessionInfo?.campaign_id)
+          loadStats()
+          loadDialedContacts()
+        }, 2000)
+      } catch (error: any) {
+        console.error('Auto-dial error:', error)
+        // If no more contacts, disable auto-dial
+        if (error.response?.status === 404) {
+          setAutoDialEnabled(false)
+        }
+      }
+    }
+  }
+
+  const handleCallUpdate = (data: any) => {
+    // If status is ended/failed/busy/no_answer, clear the call immediately
+    const endedStatuses = ['ended', 'failed', 'busy', 'no_answer', 'transferred', 'parked']
+    if (data.status && endedStatuses.includes(data.status)) {
+      setCurrentCall(null)
+      loadStats() // Refresh stats
+      loadDialedContacts() // Refresh dialed contacts
+      
+      // Auto-dial next if enabled
+      handleAutoDialNext(data.status)
+      return
+    }
+    
+    // If we have a current call and this update is for a different call, check if current call ended
+    if (currentCall && data.call_id && currentCall.id !== data.call_id) {
+      // This might be a new call, but first check if current call is still active
+      loadCurrentCall()
+      return
+    }
+    
+    if (data.call_id) {
+      loadCurrentCall()
+    } else {
+      // If no call_id but update received, refresh to check current state
+      loadCurrentCall()
+    }
+  }
+
+  const handleStatsUpdate = (data: any) => {
+    loadStats()
+  }
+
+  const handleAgentStatus = (data: any) => {
+    console.log('Agent status update:', data)
+  }
+
+  const handleIncomingCall = async (data: any) => {
+    if (data.call_id && (data.direction === 'inbound' || data.data?.direction === 'inbound')) {
+      try {
+        // First try to get current call (might be the incoming call)
+        const currentCall = await callsAPI.getCurrent()
+        if (currentCall && currentCall.id === data.call_id && currentCall.direction === 'inbound') {
+          setIncomingCall(currentCall)
+          return
+        }
+        // Otherwise fetch from history
+        const calls = await callsAPI.getHistory('inbound')
+        const call = calls.find(c => c.id === data.call_id)
+        if (call && (call.status === 'ringing' || call.status === 'dialing')) {
+          setIncomingCall(call)
+        }
+      } catch (error) {
+        console.error('Error loading incoming call:', error)
+        // Fallback: try to load current call
+        try {
+          const currentCall = await callsAPI.getCurrent()
+          if (currentCall && currentCall.direction === 'inbound') {
+            setIncomingCall(currentCall)
+          }
+        } catch (e) {
+          console.error('Error loading current call as incoming:', e)
+        }
+      }
+    }
+  }
+
+  const handleIncomingCallAnswer = () => {
+    setIncomingCall(null)
+    loadCurrentCall()
+    loadStats()
+  }
+
+  const handleIncomingCallReject = () => {
+    setIncomingCall(null)
+    loadStats()
+  }
+
+  const handleDispositionSet = () => {
+    loadCurrentCall()
+    loadStats()
+  }
+
+  const formatDateTime = (date: Date) => {
+    return date.toLocaleString('en-US', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900">
+        <div className="text-xl text-slate-700 dark:text-slate-300">Loading...</div>
+      </div>
+    )
+  }
+
+  return (
+    <DashboardLayout
+      timeString={formatDateTime(currentTime)}
+    >
+      {/* Agent Info & Call Status Bar */}
+      <div className="mb-4 p-4 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-card">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-4">
+            <div className="text-sm text-slate-600 dark:text-slate-300">
+              <span className="font-semibold">User:</span> {agent?.username || 'N/A'} |{' '}
+              <span className="font-semibold">Phone:</span> SIP/{agent?.username || 'N/A'} |{' '}
+              {agent?.campaign_code && (
+                <>
+                  <span className="font-semibold">Campaign:</span> {agent.campaign_code}
+                </>
+              )}
+            </div>
+            {currentCall && isCallActive(currentCall) && <CallTimer call={currentCall} />}
+          </div>
+          <div>
+            {currentCall && isCallActive(currentCall) ? (
+              <span className="inline-flex items-center px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-bold shadow-lg">
+                <span className="w-2 h-2 bg-white rounded-full animate-pulse mr-2"></span>
+                LIVE CALL - {currentCall.phone_number}
+              </span>
+            ) : (
+              <span className="inline-flex items-center px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-100 text-sm font-semibold">
+                NO LIVE CALL
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content Tabs */}
+      <div className="mb-4">
+        <div className="flex space-x-2 border-b border-slate-200 dark:border-slate-700">
+          {(['dialer', 'history'] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-4 py-2 font-semibold text-sm transition-colors ${
+                activeTab === tab
+                  ? 'border-b-2 border-blue-600 text-blue-600 dark:text-blue-400'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab Content */}
+      {activeTab === 'dialer' && (
+        <div className="space-y-6">
+          {/* Two Column Layout */}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            {/* Left Column - Call Controls */}
+            <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 shadow-sm">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Call Controls</h2>
+                <div className="flex items-center space-x-3">
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={autoDialEnabled}
+                      onChange={(e) => setAutoDialEnabled(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                    />
+                    <span className="text-sm text-slate-600 dark:text-slate-400">Auto-Dial</span>
+                  </label>
+                  {currentCall && (
+                    <span className="inline-flex items-center px-3 py-1 rounded-full bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 text-xs font-medium">
+                      <span className="w-1.5 h-1.5 bg-green-600 rounded-full animate-pulse mr-2"></span>
+                      Active Call
+                    </span>
+                  )}
+                </div>
+              </div>
+              <CallControls
+                currentCall={currentCall}
+                onCallUpdate={loadCurrentCall}
+                onStatsUpdate={loadStats}
+              />
+            </div>
+
+            {/* Right Column - Statistics */}
+            <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 shadow-sm">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Today's Statistics</h2>
+                <button
+                  onClick={loadStats}
+                  className="p-2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
+                  title="Refresh stats"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              </div>
+              <StatsDashboard stats={stats} onRefresh={loadStats} />
+            </div>
+          </div>
+
+          {/* Customer Information - Full Width */}
+          <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 shadow-sm">
+            <h2 className="text-lg font-semibold mb-6 text-slate-900 dark:text-slate-100">
+              Customer Information
+            </h2>
+            <CustomerInfoForm currentCall={currentCall} campaigns={campaigns} />
+          </div>
+
+          {/* Dialed Contacts Section */}
+          <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 shadow-sm">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Dialed Contacts</h2>
+              <button
+                onClick={loadDialedContacts}
+                className="p-2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
+                title="Refresh dialed contacts"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+            </div>
+            {dialedContacts.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
+                  <thead className="bg-slate-50 dark:bg-slate-900">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Name</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Phone</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Status</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Attempts</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Last Dialed</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
+                    {dialedContacts.map((contact) => (
+                      <tr key={contact.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/50">
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-900 dark:text-slate-100">
+                          {contact.name || 'N/A'}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-900 dark:text-slate-100">
+                          {contact.phone}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                            contact.status === 'contacted' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' :
+                            contact.status === 'busy' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300' :
+                            contact.status === 'not_answered' ? 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300' :
+                            contact.status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300' :
+                            'bg-slate-100 text-slate-800 dark:bg-slate-700 dark:text-slate-300'
+                          }`}>
+                            {contact.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-900 dark:text-slate-100">
+                          {contact.dial_attempts || 0}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-500 dark:text-slate-400">
+                          {contact.last_dialed_at ? new Date(contact.last_dialed_at).toLocaleString() : 'N/A'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-center py-8 text-slate-500 dark:text-slate-400">
+                No dialed contacts yet
+              </div>
+            )}
+          </div>
+
+          {/* Disposition Codes - Only show when call is active */}
+          {currentCall && (
+            <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 shadow-sm">
+              <h2 className="text-lg font-semibold mb-6 text-slate-900 dark:text-slate-100">
+                Disposition Codes
+              </h2>
+              <DispositionCodes call={currentCall} onDispositionSet={handleDispositionSet} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'history' && (
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-6 shadow-card">
+          <h2 className="text-xl font-bold mb-4 text-slate-900 dark:text-slate-100">Call History</h2>
+          <CallHistory />
+        </div>
+      )}
+
+      {/* WebRTC Softphone - Hidden component that manages browser-based calling */}
+      {agent && (
+        <WebRTCSoftphone
+          agentExtension={agent.phone_extension}
+          agentPassword="password123"
+          onCallStateChange={(isInCall, remoteNumber) => {
+            // Handle call state changes if needed
+            console.log('WebRTC Call State:', { isInCall, remoteNumber })
+          }}
+        />
+      )}
+
+    </DashboardLayout>
+  )
+}

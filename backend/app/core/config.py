@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     ASTERISK_AMI_USERNAME: str = "admin"
     ASTERISK_AMI_PASSWORD: str = "amp111"
     ASTERISK_CONTEXT: str = "from-internal"
-    ASTERISK_TRUNK: str = "SIP/trunk"
-    USE_MOCK_DIALER: bool = True
+    ASTERISK_TRUNK: str = "PJSIP/trunk"  # Format: PJSIP/trunk/sip:{number}@10.50.161.239
+    USE_MOCK_DIALER: bool = False
     
     # CORS - Default includes both ports
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]

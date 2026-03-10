@@ -94,50 +94,9 @@ export default function DialerPage() {
     }
   }
 
-  // Helper functions to refresh all contact lists (used after call ends)
-  const loadActiveContacts = async () => {
-    if (!selectedCampaignId) return
-    try {
-      const active = await contactsAPI.getActive(selectedCampaignId, 500)
-      setActiveContacts(active)
-    } catch (error) {
-      console.error('Error loading active contacts:', error)
-    }
-  }
-
-  const loadDialedContacts = async () => {
-    if (!selectedCampaignId) return
-    try {
-      const dialed = await contactsAPI.getDialed(selectedCampaignId, 100)
-      setDialedContacts(dialed)
-    } catch (error) {
-      console.error('Error loading dialed contacts:', error)
-    }
-  }
-
-  const loadFailedContacts = async () => {
-    if (!selectedCampaignId) return
-    try {
-      const failed = await contactsAPI.getFailed(selectedCampaignId, 100)
-      setFailedContacts(failed)
-    } catch (error) {
-      console.error('Error loading failed contacts:', error)
-    }
-  }
-
-  // Auto-dial next contact (Vicidial-style progressive dialing)
+  // Auto-dial next contact
   const handleAutoDialNext = async () => {
-    // Early return if conditions not met
-    if (!autoDialEnabled || !selectedCampaignId) {
-      console.log('Auto-dial skipped: conditions not met', { autoDialEnabled, selectedCampaignId })
-      return
-    }
-
-    // Don't auto-dial if there's already a current call
-    if (currentCall) {
-      console.log('Auto-dial skipped: current call exists', currentCall)
-      return
-    }
+    if (!autoDialEnabled || !selectedCampaignId || currentCall) return
 
     // Clear any existing timeout
     if (autoDialTimeoutRef.current) {
@@ -145,52 +104,27 @@ export default function DialerPage() {
       autoDialTimeoutRef.current = null
     }
 
-    console.log('Auto-dial triggered: will dial next contact in 2 seconds')
-
-    // Wait 2 seconds before dialing next (Vicidial-style progressive dialing)
+    // Wait 2-3 seconds before dialing next (Pakistan industry standard)
     autoDialTimeoutRef.current = setTimeout(async () => {
       try {
-        // Double-check for active call before dialing (reload from backend)
-        const currentCallCheck = await callsAPI.getCurrent()
-        if (currentCallCheck) {
-          console.log('Active call detected, skipping auto-dial:', currentCallCheck)
-          // Update currentCall state
-          setCurrentCall(currentCallCheck)
-          autoDialTimeoutRef.current = null
-          return
-        }
-
-        console.log('Fetching next contact for auto-dial...')
         const nextContact = await contactsAPI.getNext(selectedCampaignId)
         if (!nextContact) {
-          console.log('No more contacts available, disabling auto-dial')
           setAutoDialEnabled(false)
           alert('No more contacts available in this campaign')
-          autoDialTimeoutRef.current = null
           return
         }
 
-        console.log('Auto-dialing contact:', nextContact.phone)
         await callsAPI.dial(nextContact.phone, selectedCampaignId, nextContact.id)
         loadCurrentCall()
         loadStats()
         loadContacts()
-        autoDialTimeoutRef.current = null
       } catch (error: any) {
         console.error('Auto-dial error:', error)
-        autoDialTimeoutRef.current = null
-        
-        // Handle "active call" error gracefully - just reload current call
-        if (error.response?.status === 400 && error.response?.data?.detail?.includes('active call')) {
-          console.log('Active call detected, reloading current call state')
-          loadCurrentCall()
-          return
-        }
         if (error.response?.status === 404) {
           setAutoDialEnabled(false)
         }
       }
-    }, 2000) // 2 second delay for Vicidial-style progressive dialing
+    }, 2500) // 2.5 second delay
   }
 
   useEffect(() => {
@@ -291,28 +225,17 @@ export default function DialerPage() {
   useEffect(() => {
     if (selectedCampaignId) {
       loadContacts()
-      // Also refresh campaign stats when tab changes
-      loadCampaignStats()
     }
   }, [selectedCampaignId, contactTab])
 
-  // Auto-dial when call ends (Vicidial-style progressive dialing)
-  // This useEffect ensures auto-dial triggers when currentCall becomes null
+  // Auto-dial when call ends
   useEffect(() => {
-    // Only trigger if:
-    // 1. Auto-dial is enabled
-    // 2. Campaign is selected
-    // 3. No current call (agent is available)
-    // 4. Not already in a dialing timeout
-    if (!currentCall && autoDialEnabled && selectedCampaignId && !autoDialTimeoutRef.current) {
-      console.log('Auto-dial useEffect triggered: conditions met, will call handleAutoDialNext')
-      // Small delay to ensure all state updates are complete
-      const timeoutId = setTimeout(() => {
-        handleAutoDialNext()
-      }, 500) // 500ms delay to ensure state is fully updated
-      
-      return () => {
-        clearTimeout(timeoutId)
+    if (!currentCall && autoDialEnabled && selectedCampaignId) {
+      handleAutoDialNext()
+    }
+    return () => {
+      if (autoDialTimeoutRef.current) {
+        clearTimeout(autoDialTimeoutRef.current)
       }
     }
   }, [currentCall, autoDialEnabled, selectedCampaignId])
@@ -338,44 +261,27 @@ export default function DialerPage() {
     try {
       const call = await callsAPI.getCurrent()
       if (!call || !isCallActive(call)) {
-        // Only update if it's actually different to avoid unnecessary re-renders
-        if (currentCall !== null) {
-          setCurrentCall(null)
-        }
+        setCurrentCall(null)
         return
       }
-      // Only update if call is different
-      if (!currentCall || currentCall.id !== call.id) {
-        setCurrentCall(call)
-      }
+      setCurrentCall(call)
     } catch (error) {
       console.error('Error loading current call:', error)
-      if (currentCall !== null) {
-        setCurrentCall(null)
-      }
+      setCurrentCall(null)
     }
   }
 
   const handleCallUpdate = (data: any) => {
     const endedStatuses = ['ended', 'failed', 'busy', 'no_answer', 'transferred', 'parked']
     if (data.status && endedStatuses.includes(data.status)) {
-      console.log('Call ended, status:', data.status, 'Will refresh contact lists and trigger auto-dial if enabled')
-      // Immediately clear current call
       setCurrentCall(null)
       loadStats()
+      loadContacts()
       
-      // Refresh all contact lists to reflect status changes (CONTACTED -> dialed, FAILED -> failed)
-      // Add small delay to ensure database commit is complete
-      setTimeout(() => {
-        console.log('Refreshing contact lists after call ended...')
-        loadActiveContacts()
-        loadDialedContacts()
-        loadFailedContacts()
-        loadCampaignStats() // Also refresh campaign stats
-      }, 500) // 500ms delay to ensure database commit completes
-      
-      // Note: Auto-dial will be triggered by the useEffect that watches currentCall
-      // No need to call handleAutoDialNext here - the useEffect will handle it
+      // Auto-dial next if enabled
+      if (autoDialEnabled && selectedCampaignId) {
+        handleAutoDialNext()
+      }
       return
     }
     
@@ -708,14 +614,8 @@ export default function DialerPage() {
                 {contactTab === 'active' && (
                   <>
                     {activeContacts.length > 0 ? (
-                      <>
-                        <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
-                          <p className="text-sm text-blue-800 dark:text-blue-300 font-medium">
-                            📋 {activeContacts.length} contact(s) ready to dial. Each contact will be dialed once. Successful calls go to "Dialed", failed calls go to "Failed".
-                          </p>
-                        </div>
-                        <div className="overflow-x-auto">
-                          <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
                           <thead className="bg-slate-50 dark:bg-slate-900">
                             <tr>
                               <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Name</th>
@@ -745,11 +645,10 @@ export default function DialerPage() {
                             ))}
                           </tbody>
                         </table>
-                        </div>
-                      </>
+                      </div>
                     ) : (
                       <div className="text-center py-8 text-slate-500 dark:text-slate-400">
-                        No active contacts available. All contacts have been dialed. Check "Dialed" or "Failed" tabs.
+                        No active contacts available
                       </div>
                     )}
                   </>
@@ -758,14 +657,8 @@ export default function DialerPage() {
                 {contactTab === 'dialed' && (
                   <>
                     {dialedContacts.length > 0 ? (
-                      <>
-                        <div className="mb-4 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
-                          <p className="text-sm text-green-800 dark:text-green-300 font-medium">
-                            ✅ {dialedContacts.length} contact(s) successfully dialed and contacted. These contacts have been removed from the active list.
-                          </p>
-                        </div>
-                        <div className="overflow-x-auto">
-                          <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
                           <thead className="bg-slate-50 dark:bg-slate-900">
                             <tr>
                               <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Name</th>
@@ -789,11 +682,10 @@ export default function DialerPage() {
                             ))}
                           </tbody>
                         </table>
-                        </div>
-                      </>
+                      </div>
                     ) : (
                       <div className="text-center py-8 text-slate-500 dark:text-slate-400">
-                        No dialed contacts yet. Successfully contacted customers will appear here.
+                        No dialed contacts yet
                       </div>
                     )}
                   </>
@@ -802,64 +694,49 @@ export default function DialerPage() {
                 {contactTab === 'failed' && (
                   <>
                     {failedContacts.length > 0 ? (
-                      <>
-                        <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-                          <p className="text-sm text-red-800 dark:text-red-300 font-medium">
-                            ⚠️ {failedContacts.length} contact(s) failed. These contacts will not be auto-dialed. Click "Reactivate" to try again.
-                          </p>
-                        </div>
-                        <div className="overflow-x-auto">
-                          <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
-                            <thead className="bg-slate-50 dark:bg-slate-900">
-                              <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Name</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Phone</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Last Dialed</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Status</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Actions</th>
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
+                          <thead className="bg-slate-50 dark:bg-slate-900">
+                            <tr>
+                              <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Name</th>
+                              <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Phone</th>
+                              <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Last Dialed</th>
+                              <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody className="bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
+                            {failedContacts.map((contact) => (
+                              <tr key={contact.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/50">
+                                <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
+                                  {contact.name || 'N/A'}
+                                </td>
+                                <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
+                                  {contact.phone}
+                                </td>
+                                <td className="px-4 py-3 text-sm text-slate-500 dark:text-slate-400">
+                                  {contact.last_dialed_at ? new Date(contact.last_dialed_at).toLocaleString() : 'N/A'}
+                                </td>
+                                <td className="px-4 py-3">
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        await contactsAPI.reactivate(contact.id)
+                                        loadContacts()
+                                        alert('Contact reactivated successfully')
+                                      } catch (error: any) {
+                                        alert(error.response?.data?.detail || 'Error reactivating contact')
+                                      }
+                                    }}
+                                    className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                                  >
+                                    Reactivate
+                                  </button>
+                                </td>
                               </tr>
-                            </thead>
-                            <tbody className="bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
-                              {failedContacts.map((contact) => (
-                                <tr key={contact.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                                  <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
-                                    {contact.name || 'N/A'}
-                                  </td>
-                                  <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
-                                    {contact.phone}
-                                  </td>
-                                  <td className="px-4 py-3 text-sm text-slate-500 dark:text-slate-400">
-                                    {contact.last_dialed_at ? new Date(contact.last_dialed_at).toLocaleString() : 'N/A'}
-                                  </td>
-                                  <td className="px-4 py-3">
-                                    <span className="px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300">
-                                      Failed - Try Next
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-3">
-                                    <button
-                                      onClick={async () => {
-                                        try {
-                                          await contactsAPI.reactivate(contact.id)
-                                          loadContacts()
-                                          loadActiveContacts()
-                                          loadFailedContacts()
-                                          alert('Contact reactivated successfully - will be dialed again')
-                                        } catch (error: any) {
-                                          alert(error.response?.data?.detail || 'Error reactivating contact')
-                                        }
-                                      }}
-                                      className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-                                    >
-                                      Reactivate
-                                    </button>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     ) : (
                       <div className="text-center py-8 text-slate-500 dark:text-slate-400">
                         No failed contacts
