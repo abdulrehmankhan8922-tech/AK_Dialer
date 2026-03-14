@@ -53,32 +53,3 @@ async def get_campaign(campaign_id: int, db: Session = Depends(get_db)):
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     return CampaignResponse.model_validate(campaign)
-
-
-@router.delete("/{campaign_id}")
-async def delete_campaign(
-    campaign_id: int,
-    db: Session = Depends(get_db),
-    agent_id: int = Depends(get_current_agent_id)
-):
-    """Delete a campaign (any authenticated agent can delete campaigns)"""
-    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    
-    # Check if campaign has associated contacts or calls
-    from app.models.contact import Contact
-    from app.models.call import Call
-    
-    contact_count = db.query(Contact).filter(Contact.campaign_id == campaign_id).count()
-    call_count = db.query(Call).filter(Call.campaign_id == campaign_id).count()
-    
-    if contact_count > 0 or call_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot delete campaign. It has {contact_count} contacts and {call_count} calls associated with it. Please remove all contacts and calls first."
-        )
-    
-    db.delete(campaign)
-    db.commit()
-    return {"success": True, "message": f"Campaign '{campaign.name}' deleted successfully"}

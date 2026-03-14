@@ -202,9 +202,6 @@ export const campaignsAPI = {
     const response = await api.post<Campaign>('/api/campaigns/', campaignData)
     return response.data
   },
-  delete: async (campaign_id: number): Promise<void> => {
-    await api.delete(`/api/campaigns/${campaign_id}`)
-  },
   listAll: async (): Promise<Campaign[]> => {
     const response = await api.get<{ campaigns: Campaign[] }>('/api/admin/campaigns')
     return response.data.campaigns
