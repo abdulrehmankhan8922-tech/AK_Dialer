@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]
     
     # Call Settings
-    DEFAULT_CALL_TIMEOUT: int = 60
+    DEFAULT_CALL_TIMEOUT: int = 30  # 30 seconds max ring time
     MAX_CONCURRENT_CALLS: int = 10
     
     class Config:

@@ -550,11 +550,11 @@ class AMIEventListener:
                     call.ring_time = datetime.now(timezone.utc)
                     logger.info(f"Call {call_unique_id} started ringing at {call.ring_time}")
                 
-                # Check if call has been ringing for more than 60 seconds (max ring time)
+                # Check if call has been ringing for more than 30 seconds (max ring time)
                 if new_status == CallStatus.RINGING and call.ring_time:
                     ring_duration = (datetime.now(timezone.utc) - call.ring_time).total_seconds()
-                    if ring_duration > 60:
-                        logger.warning(f"Call {call_unique_id} has been ringing for {ring_duration}s (>60s), marking as failed")
+                    if ring_duration > 30:
+                        logger.warning(f"Call {call_unique_id} has been ringing for {ring_duration}s (>30s), marking as failed")
                         call.status = CallStatus.NO_ANSWER.value
                         call.end_time = datetime.now(timezone.utc)
                         if call.start_time:
@@ -566,7 +566,7 @@ class AMIEventListener:
                             contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
                             if contact:
                                 contact.status = ContactStatus.FAILED
-                                logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (60s ring timeout)")
+                                logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (30s ring timeout)")
                         # Update agent status
                         if call.agent_id:
                             agent = db.query(Agent).filter(Agent.id == call.agent_id).first()
@@ -652,14 +652,26 @@ class AMIEventListener:
             is_customer_hangup = False
             agent_channel = None
             
+            # Also check database for channels
+            customer_channel_db = call.customer_channel
+            agent_channel_db = call.agent_channel
+            
             if channels:
-                customer_channel = channels.get('customer_channel')
-                agent_channel = channels.get('agent_channel')
+                customer_channel = channels.get('customer_channel') or customer_channel_db
+                agent_channel = channels.get('agent_channel') or agent_channel_db
                 
                 # Check if the hanging channel is the customer channel
                 if customer_channel and (channel == customer_channel or uniqueid == channels.get('customer_uniqueid')):
                     is_customer_hangup = True
-                    logger.info(f"Customer channel hung up, will auto-hangup agent channel")
+                    logger.info(f"Customer channel {channel} hung up, will auto-hangup agent channel {agent_channel}")
+            elif customer_channel_db:
+                # Use database channels if tracker doesn't have them
+                customer_channel = customer_channel_db
+                agent_channel = agent_channel_db
+                # Check if hanging channel contains "trunk" (customer channel) or matches customer channel
+                if 'trunk' in channel.lower() or channel == customer_channel or channel.startswith('PJSIP/trunk') or channel.startswith('SIP/trunk'):
+                    is_customer_hangup = True
+                    logger.info(f"Customer channel {channel} hung up (from DB), will auto-hangup agent channel {agent_channel}")
             
             # Update call status
             if call.status not in [CallStatus.ENDED.value, CallStatus.FAILED.value]:
@@ -683,8 +695,15 @@ class AMIEventListener:
                     logger.info(f"Call {call_unique_id} ended without answer, ring_duration: {call.ring_duration}s")
                 
                 # Map cause codes to call status
+                # Immediate failure codes (off/out of service): 1, 2, 3, 20, 21, 22, 28
                 cause_code = int(cause) if cause.isdigit() else 0
-                if cause_code == 16:  # Normal clearing
+                immediate_failure_codes = [1, 2, 3, 20, 21, 22, 28]  # Unallocated, No route, No route to destination, etc.
+                
+                if cause_code in immediate_failure_codes:
+                    # Number is off/out of service - mark as FAILED immediately
+                    call.status = CallStatus.FAILED.value
+                    logger.warning(f"Call {call_unique_id} failed immediately - cause code {cause_code} ({cause_txt}) - Number off/out of service")
+                elif cause_code == 16:  # Normal clearing
                     call.status = CallStatus.ENDED.value
                 elif cause_code == 17:  # User busy
                     call.status = CallStatus.BUSY.value
@@ -740,23 +759,31 @@ class AMIEventListener:
                 
                 logger.info(f"Call {call_unique_id} ended: {cause_txt} (Cause: {cause})")
             
-            # Auto-hangup agent channel if customer hung up
-            if is_customer_hangup and agent_channel:
+            # Auto-hangup agent channel if customer hung up (ensure call is cleared on dialer)
+            if is_customer_hangup:
+                if agent_channel:
+                    try:
+                        from app.services.asterisk_service import AsteriskService
+                        asterisk_service = AsteriskService()
+                        await asterisk_service.connect()
+                        
+                        # Hangup agent channel
+                        result = await asterisk_service.send_action("Hangup", {"Channel": agent_channel})
+                        if result.get("Response") == "Success":
+                            logger.info(f"✅ Auto-hungup agent channel {agent_channel} after customer hangup")
+                        else:
+                            logger.warning(f"Failed to auto-hangup agent channel: {result.get('Message', 'Unknown error')}")
+                        
+                        await asterisk_service.disconnect()
+                    except Exception as hangup_error:
+                        logger.error(f"Error auto-hanging up agent channel: {hangup_error}")
+                
+                # Also try to hangup using dialer_service as fallback
                 try:
-                    from app.services.asterisk_service import AsteriskService
-                    asterisk_service = AsteriskService()
-                    await asterisk_service.connect()
-                    
-                    # Hangup agent channel
-                    result = await asterisk_service.send_action("Hangup", {"Channel": agent_channel})
-                    if result.get("Response") == "Success":
-                        logger.info(f"Auto-hungup agent channel {agent_channel} after customer hangup")
-                    else:
-                        logger.warning(f"Failed to auto-hangup agent channel: {result.get('Message', 'Unknown error')}")
-                    
-                    await asterisk_service.disconnect()
+                    from app.services.dialer_service import dialer_service
+                    await dialer_service.hangup_call(call.call_unique_id)
                 except Exception as hangup_error:
-                    logger.error(f"Error auto-hanging up agent channel: {hangup_error}")
+                    logger.debug(f"Could not hangup via dialer_service (may already be hung up): {hangup_error}")
             
             # Clean up tracking
             channel_tracker.remove_call(call_unique_id)
@@ -953,7 +980,7 @@ class AMIEventListener:
                 channel_tracker.set_agent_channel(call_unique_id, destination, None)
     
     async def _handle_dial_end(self, event: Dict[str, str]):
-        """Handle DialEnd event"""
+        """Handle DialEnd event - Detect immediate failures (off/out of service)"""
         # Dial attempt completed
         channel = event.get('Channel', '')
         destination = event.get('Destination', '')
@@ -963,27 +990,81 @@ class AMIEventListener:
         if call_unique_id:
             logger.debug(f"Dial end: {channel} -> {destination}, Status: {dial_status}")
             
-            if dial_status == 'ANSWER':
-                # Update call status to answered
-                db = SessionLocal()
-                try:
-                    call = db.query(Call).filter(Call.call_unique_id == call_unique_id).first()
-                    if call:
-                        call.status = CallStatus.ANSWERED.value
+            db = SessionLocal()
+            try:
+                call = db.query(Call).filter(Call.call_unique_id == call_unique_id).first()
+                if call:
+                    # Immediate failure statuses (off/out of service)
+                    immediate_failure_statuses = ['CHANUNAVAIL', 'CONGESTION', 'FAILURE', 'NONEXISTENT', 'INVALIDNUMBER']
+                    
+                    if dial_status in immediate_failure_statuses:
+                        # Number is off/out of service - mark as FAILED immediately
+                        call.status = CallStatus.FAILED.value
+                        call.end_time = datetime.now(timezone.utc)
+                        if call.start_time:
+                            call.duration = int((call.end_time - call.start_time).total_seconds())
+                        logger.warning(f"Call {call_unique_id} failed immediately - DialStatus: {dial_status} - Number off/out of service")
+                        
+                        # Update contact status to FAILED immediately
+                        if call.contact_id:
+                            from app.models.contact import Contact, ContactStatus
+                            contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+                            if contact:
+                                contact.status = ContactStatus.FAILED
+                                logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED immediately (DialStatus: {dial_status})")
+                        
+                        # Update agent status
+                        if call.agent_id:
+                            agent = db.query(Agent).filter(Agent.id == call.agent_id).first()
+                            if agent:
+                                agent.status = AgentStatus.AVAILABLE.value
+                        
                         db.commit()
                         
+                        # Send WebSocket update
                         if call.agent_id:
                             await websocket_manager.send_call_update(call.agent_id, {
                                 "call_id": call.id,
                                 "status": call.status,
-                                "phone_number": call.phone_number,
-                                "direction": call.direction
+                                "phone_number": call.phone_number
                             })
-                except Exception as e:
-                    logger.error(f"Error handling DialEnd event: {e}")
-                    db.rollback()
-                finally:
-                    db.close()
+                            await websocket_manager.send_agent_status_update(call.agent_id, "available")
+                        
+                        # Try to hangup the call
+                        try:
+                            from app.services.dialer_service import dialer_service
+                            await dialer_service.hangup_call(call.call_unique_id)
+                        except Exception as hangup_error:
+                            logger.debug(f"Could not hangup failed call: {hangup_error}")
+                        
+                        return
+                    
+                    # Update call status based on DialStatus
+                    if dial_status == 'ANSWER':
+                        call.status = CallStatus.ANSWERED.value
+                        if not call.answered_time:
+                            call.answered_time = datetime.now(timezone.utc)
+                    elif dial_status in ['BUSY', 'BUSYLINE']:
+                        call.status = CallStatus.BUSY.value
+                    elif dial_status in ['NOANSWER', 'NO ANSWER']:
+                        call.status = CallStatus.NO_ANSWER.value
+                    elif dial_status in ['CANCEL', 'CANCELLED']:
+                        call.status = CallStatus.FAILED.value
+                    
+                    db.commit()
+                    
+                    if call.agent_id:
+                        await websocket_manager.send_call_update(call.agent_id, {
+                            "call_id": call.id,
+                            "status": call.status,
+                            "phone_number": call.phone_number,
+                            "direction": call.direction
+                        })
+            except Exception as e:
+                logger.error(f"Error handling DialEnd event: {e}")
+                db.rollback()
+            finally:
+                db.close()
     
     async def _handle_cdr(self, event: Dict[str, str]):
         """Handle CDR event from Asterisk"""

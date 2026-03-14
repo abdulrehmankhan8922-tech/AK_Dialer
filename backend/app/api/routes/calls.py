@@ -53,13 +53,18 @@ async def dial(
             elif active_call.answered_time:
                 time_diff = (current_time - active_call.answered_time).total_seconds()
             
-            # Check if call is stuck in DIALING (older than 60 seconds)
-            if active_call.status == CallStatus.DIALING.value and time_diff and time_diff > 60:
+            # Check if call is stuck in DIALING (older than 30 seconds)
+            if active_call.status == CallStatus.DIALING.value and time_diff and time_diff > 30:
                 logger.warning(f"Clearing stuck DIALING call {active_call.id} for agent {agent_id} (age: {time_diff}s)")
                 active_call.status = CallStatus.FAILED.value
                 active_call.end_time = current_time
                 # Update agent status
                 agent.status = AgentStatus.AVAILABLE.value
+                # Update contact status if exists
+                if active_call.contact_id:
+                    contact = db.query(Contact).filter(Contact.id == active_call.contact_id).first()
+                    if contact:
+                        contact.status = ContactStatus.FAILED
                 db.commit()
                 # Continue with new call
             # Check if call is stuck in CONNECTED/ANSWERED (older than 2 hours - likely stale)
@@ -80,8 +85,8 @@ async def dial(
                             contact.status = ContactStatus.FAILED
                 db.commit()
                 # Continue with new call
-            # Check if call is in RINGING for too long (older than 120 seconds)
-            elif active_call.status == CallStatus.RINGING.value and time_diff and time_diff > 120:
+            # Check if call is in RINGING for too long (older than 30 seconds)
+            elif active_call.status == CallStatus.RINGING.value and time_diff and time_diff > 30:
                 logger.warning(f"Clearing stuck RINGING call {active_call.id} for agent {agent_id} (age: {time_diff}s)")
                 active_call.status = CallStatus.NO_ANSWER.value
                 active_call.end_time = current_time
@@ -91,7 +96,7 @@ async def dial(
                 if active_call.contact_id:
                     contact = db.query(Contact).filter(Contact.id == active_call.contact_id).first()
                     if contact:
-                        contact.status = ContactStatus.NOT_ANSWERED
+                        contact.status = ContactStatus.FAILED
                 db.commit()
                 # Continue with new call
             else:
@@ -458,10 +463,10 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
         # 1. In active status (not ended/failed/busy/no_answer)
         # 2. Have no end_time (not ended)
         # 3. Started within last 24 hours (safety check for old stuck calls)
-        # 4. Not stuck in DIALING status for more than 60 seconds
+        # 4. Not stuck in DIALING status for more than 30 seconds
         active_statuses = [CallStatus.DIALING, CallStatus.RINGING, CallStatus.CONNECTED, CallStatus.ANSWERED]
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
-        dialing_timeout = datetime.now(timezone.utc) - timedelta(seconds=60)  # 60 seconds timeout for DIALING
+        dialing_timeout = datetime.now(timezone.utc) - timedelta(seconds=30)  # 30 seconds timeout for DIALING
         
         call = db.query(Call).filter(
             Call.agent_id == agent_id,
@@ -481,9 +486,9 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
             elif call.answered_time:
                 time_diff = (current_time - call.answered_time).total_seconds()
             
-            # Check if call is stuck in DIALING (older than 60 seconds)
-            if call.status == CallStatus.DIALING.value and time_diff and time_diff > 60:
-                logger.warning(f"Call {call.id} stuck in DIALING status for more than 60 seconds, marking as failed")
+            # Check if call is stuck in DIALING (older than 30 seconds)
+            if call.status == CallStatus.DIALING.value and time_diff and time_diff > 30:
+                logger.warning(f"Call {call.id} stuck in DIALING status for more than 30 seconds, marking as failed")
                 call.status = CallStatus.FAILED.value
                 call.end_time = current_time
                 # Update agent status
@@ -512,9 +517,9 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
                             contact.status = ContactStatus.FAILED
                 db.commit()
                 return {"call": None}
-            # Check if call is stuck in RINGING (older than 120 seconds)
-            elif call.status == CallStatus.RINGING.value and time_diff and time_diff > 120:
-                logger.warning(f"Call {call.id} stuck in RINGING status for more than 120 seconds, marking as no answer")
+            # Check if call is stuck in RINGING (older than 30 seconds)
+            elif call.status == CallStatus.RINGING.value and time_diff and time_diff > 30:
+                logger.warning(f"Call {call.id} stuck in RINGING status for more than 30 seconds, marking as no answer")
                 call.status = CallStatus.NO_ANSWER.value
                 call.end_time = current_time
                 # Update agent status
