@@ -13,6 +13,7 @@ import CallHistory from '@/components/agent/CallHistory'
 import IncomingCallModal from '@/components/agent/IncomingCallModal'
 import WebRTCSoftphone from '@/components/agent/WebRTCSoftphone'
 import DashboardLayout from '@/components/shared/DashboardLayout'
+import CampaignAddEditModal from '@/components/shared/CampaignAddEditModal'
 import type { Call, Stats, Campaign, Contact } from '@/lib/api'
 
 type ContactTab = 'active' | 'dialed' | 'failed'
@@ -35,6 +36,7 @@ export default function DialerPage() {
   const [failedContacts, setFailedContacts] = useState<Contact[]>([])
   const [autoDialEnabled, setAutoDialEnabled] = useState(false)
   const [campaignStats, setCampaignStats] = useState({ total: 0, active: 0, dialed: 0, failed: 0 })
+  const [showCreateCampaignModal, setShowCreateCampaignModal] = useState(false)
   const autoDialTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   // Helper function to check if a call is active
@@ -496,27 +498,72 @@ export default function DialerPage() {
       {/* Campaign Selector & Stats Bar */}
       <div className="mb-4 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-slate-800 dark:to-slate-700 border border-blue-200 dark:border-slate-600 rounded-lg shadow-lg">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-          <div className="flex-1">
-            <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
-              Select Campaign <span className="text-red-500">*</span>
-            </label>
-            <select
-              value={selectedCampaignId || ''}
-              onChange={(e) => {
-                const campaignId = e.target.value ? parseInt(e.target.value) : null
-                setSelectedCampaignId(campaignId)
-                setAutoDialEnabled(false) // Disable auto-dial when campaign changes
-              }}
-              className="w-full md:w-auto min-w-[300px] px-4 py-2.5 border-2 border-blue-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-medium"
+          <div className="flex-1 flex gap-3 items-end">
+            <div className="flex-1">
+              <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
+                Select Campaign <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={selectedCampaignId || ''}
+                onChange={(e) => {
+                  const campaignId = e.target.value ? parseInt(e.target.value) : null
+                  setSelectedCampaignId(campaignId)
+                  setAutoDialEnabled(false) // Disable auto-dial when campaign changes
+                }}
+                className="w-full px-4 py-2.5 border-2 border-blue-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-medium"
+                disabled={!!currentCall}
+              >
+                <option value="">-- Select a Campaign --</option>
+                {campaigns.map((campaign) => (
+                  <option key={campaign.id} value={campaign.id}>
+                    {campaign.name} ({campaign.code})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              onClick={() => setShowCreateCampaignModal(true)}
               disabled={!!currentCall}
+              className="px-4 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center gap-2 whitespace-nowrap"
+              title="Create New Campaign"
             >
-              <option value="">-- Select a Campaign --</option>
-              {campaigns.map((campaign) => (
-                <option key={campaign.id} value={campaign.id}>
-                  {campaign.name} ({campaign.code})
-                </option>
-              ))}
-            </select>
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              Create Campaign
+            </button>
+            {selectedCampaignId && (
+              <button
+                onClick={async () => {
+                  const campaign = campaigns.find(c => c.id === selectedCampaignId)
+                  const campaignName = campaign?.name || 'this campaign'
+                  
+                  if (!confirm(`Are you sure you want to delete "${campaignName}"?\n\nThis action cannot be undone. The campaign will only be deleted if it has no contacts or calls.`)) {
+                    return
+                  }
+                  
+                  try {
+                    await campaignsAPI.delete(selectedCampaignId)
+                    // Reload campaigns list
+                    const campaignsList = await campaignsAPI.list()
+                    setCampaigns(campaignsList)
+                    setSelectedCampaignId(null)
+                    setAutoDialEnabled(false)
+                    alert('Campaign deleted successfully')
+                  } catch (error: any) {
+                    alert(error.response?.data?.detail || 'Failed to delete campaign')
+                  }
+                }}
+                disabled={!!currentCall}
+                className="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center gap-2 whitespace-nowrap"
+                title="Delete Selected Campaign"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                Delete Campaign
+              </button>
+            )}
           </div>
           
           {selectedCampaignId && (
@@ -904,6 +951,20 @@ export default function DialerPage() {
           agentPassword="password123"
           onCallStateChange={(isInCall, remoteNumber) => {
             console.log('WebRTC Call State:', { isInCall, remoteNumber })
+          }}
+        />
+      )}
+
+      {/* Create Campaign Modal */}
+      {showCreateCampaignModal && (
+        <CampaignAddEditModal
+          campaign={null}
+          onClose={() => setShowCreateCampaignModal(false)}
+          onSuccess={async () => {
+            // Reload campaigns list
+            const campaignsList = await campaignsAPI.list()
+            setCampaigns(campaignsList)
+            setShowCreateCampaignModal(false)
           }}
         />
       )}

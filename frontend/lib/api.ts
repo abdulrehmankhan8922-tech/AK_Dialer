@@ -192,6 +192,19 @@ export const campaignsAPI = {
     const response = await api.get<Campaign>(`/api/campaigns/${id}`)
     return response.data
   },
+  create: async (campaignData: {
+    name: string
+    code: string
+    description?: string
+    status?: string
+    dial_method?: string
+  }): Promise<Campaign> => {
+    const response = await api.post<Campaign>('/api/campaigns/', campaignData)
+    return response.data
+  },
+  delete: async (campaign_id: number): Promise<void> => {
+    await api.delete(`/api/campaigns/${campaign_id}`)
+  },
   listAll: async (): Promise<Campaign[]> => {
     const response = await api.get<{ campaigns: Campaign[] }>('/api/admin/campaigns')
     return response.data.campaigns

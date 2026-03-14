@@ -96,7 +96,7 @@ async def import_contacts(
         
         # Map columns with flexible matching
         phone_col = find_column(df.columns, ['phone', 'businessphone', 'phonenumber', 'mobile', 'cell', 'tel', 'telephone'])
-        name_col = find_column(df.columns, ['name', 'businessname', 'contactname', 'fullname', 'companyname'])
+        name_col = find_column(df.columns, ['name', 'customer', 'businessname', 'contactname', 'fullname', 'companyname'])
         address_col = find_column(df.columns, ['address', 'businessaddress', 'businessaddres', 'businessadd', 'addres', 'location'])
         city_col = find_column(df.columns, ['city', 'town'])
         occupation_col = find_column(df.columns, ['occupation', 'job', 'profession', 'title'])
@@ -119,8 +119,18 @@ async def import_contacts(
         
         for index, row in df.iterrows():
             try:
-                # Get phone (required)
-                phone = str(row.get(phone_col, '')).strip() if pd.notna(row.get(phone_col)) else ''
+                # Get phone (required) - handle numeric phone numbers (remove .0 suffix)
+                phone_value = row.get(phone_col, '')
+                if pd.notna(phone_value):
+                    # Convert to string and remove .0 suffix if it's a float
+                    if isinstance(phone_value, (int, float)):
+                        # Remove decimal point and trailing zeros for large numbers
+                        phone = str(int(phone_value)) if phone_value == int(phone_value) else str(phone_value).rstrip('0').rstrip('.')
+                    else:
+                        phone = str(phone_value).strip()
+                else:
+                    phone = ''
+                
                 if not phone or phone == 'nan':
                     skipped += 1
                     errors.append(f"Row {index + 2}: Missing phone number")

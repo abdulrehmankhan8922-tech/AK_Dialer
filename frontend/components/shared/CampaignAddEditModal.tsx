@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { adminAPI } from '@/lib/api'
+import { adminAPI, campaignsAPI } from '@/lib/api'
 import type { Campaign } from '@/lib/api'
 
 interface CampaignAddEditModalProps {
@@ -61,7 +61,17 @@ export default function CampaignAddEditModal({ campaign, onClose, onSuccess }: C
       if (isEditMode && campaign) {
         await adminAPI.updateCampaign(campaign.id, formData)
       } else {
-        await adminAPI.createCampaign(formData)
+        // Try campaignsAPI first (for agents), fallback to adminAPI (for admins)
+        try {
+          await campaignsAPI.create(formData)
+        } catch (campaignsError: any) {
+          // If campaignsAPI fails (e.g., 404), try adminAPI
+          if (campaignsError.response?.status === 404 || campaignsError.response?.status === 403) {
+            await adminAPI.createCampaign(formData)
+          } else {
+            throw campaignsError
+          }
+        }
       }
       onSuccess()
       onClose()
