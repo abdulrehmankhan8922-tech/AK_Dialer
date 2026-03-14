@@ -554,8 +554,8 @@ class AMIEventListener:
                 if new_status == CallStatus.RINGING and call.ring_time:
                     ring_duration = (datetime.now(timezone.utc) - call.ring_time).total_seconds()
                     if ring_duration > 30:
-                        logger.warning(f"Call {call_unique_id} has been ringing for {ring_duration}s (>30s), marking as failed")
-                        call.status = CallStatus.NO_ANSWER.value
+                        logger.warning(f"Call {call_unique_id} has been ringing for {ring_duration}s (>30s), marking as FAILED and moving to next number")
+                        call.status = CallStatus.FAILED.value  # Mark as FAILED (not NO_ANSWER) for auto-dial to continue
                         call.end_time = datetime.now(timezone.utc)
                         if call.start_time:
                             call.duration = int((call.end_time - call.start_time).total_seconds())
@@ -566,8 +566,8 @@ class AMIEventListener:
                             contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
                             if contact:
                                 contact.status = ContactStatus.FAILED
-                                logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (30s ring timeout)")
-                        # Update agent status
+                                logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (30s ring timeout) - Will move to failed list")
+                        # Update agent status to AVAILABLE (so auto-dial can continue)
                         if call.agent_id:
                             agent = db.query(Agent).filter(Agent.id == call.agent_id).first()
                             if agent:
@@ -695,11 +695,32 @@ class AMIEventListener:
                     logger.info(f"Call {call_unique_id} ended without answer, ring_duration: {call.ring_duration}s")
                 
                 # Map cause codes to call status
-                # Immediate failure codes (off/out of service): 1, 2, 3, 20, 21, 22, 28
+                # Immediate failure codes (off/out of service): 1, 2, 3, 20, 22, 28
+                # Call rejection/decline codes: 21 (Call Rejected), 0 (Unknown/Declined)
                 cause_code = int(cause) if cause.isdigit() else 0
-                immediate_failure_codes = [1, 2, 3, 20, 21, 22, 28]  # Unallocated, No route, No route to destination, etc.
+                immediate_failure_codes = [1, 2, 3, 20, 22, 28]  # Unallocated, No route, No route to destination, etc.
+                decline_codes = [21]  # Call Rejected (customer declined)
                 
-                if cause_code in immediate_failure_codes:
+                # Check if customer declined before answering
+                if cause_code in decline_codes:
+                    # Customer declined/rejected the call - mark as FAILED
+                    call.status = CallStatus.FAILED.value
+                    logger.warning(f"Call {call_unique_id} declined by customer - cause code {cause_code} ({cause_txt}) - Marking as FAILED")
+                elif cause_code == 0 and not call.answered_time:
+                    # Unknown cause code (0) and call was never answered - likely declined or rejected
+                    # Check if call was ringing for a very short time (< 5 seconds) - likely decline
+                    if call.ring_time:
+                        ring_duration = (call.end_time - call.ring_time).total_seconds()
+                        if ring_duration < 5:
+                            call.status = CallStatus.FAILED.value
+                            logger.warning(f"Call {call_unique_id} likely declined (cause 0, ring duration {ring_duration}s) - Marking as FAILED")
+                        else:
+                            # Longer ring time, treat as no answer
+                            call.status = CallStatus.NO_ANSWER.value
+                    else:
+                        # No ring time, treat as failed
+                        call.status = CallStatus.FAILED.value
+                elif cause_code in immediate_failure_codes:
                     # Number is off/out of service - mark as FAILED immediately
                     call.status = CallStatus.FAILED.value
                     logger.warning(f"Call {call_unique_id} failed immediately - cause code {cause_code} ({cause_txt}) - Number off/out of service")
@@ -707,7 +728,7 @@ class AMIEventListener:
                     call.status = CallStatus.ENDED.value
                 elif cause_code == 17:  # User busy
                     call.status = CallStatus.BUSY.value
-                elif cause_code == 18:  # No user response
+                elif cause_code == 18:  # No user response (timeout)
                     call.status = CallStatus.NO_ANSWER.value
                 elif cause_code > 0:
                     call.status = CallStatus.FAILED.value

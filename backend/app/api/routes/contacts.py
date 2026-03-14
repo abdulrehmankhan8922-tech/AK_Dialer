@@ -136,6 +136,26 @@ async def import_contacts(
                     errors.append(f"Row {index + 2}: Missing phone number")
                     continue
                 
+                # Normalize phone number to Pakistan local format (always start with 0)
+                # Remove all non-digit characters first
+                phone_digits = ''.join(filter(str.isdigit, phone))
+                
+                if phone_digits:
+                    # Remove country code if present (92 at the beginning)
+                    if phone_digits.startswith('92') and len(phone_digits) >= 12:
+                        # Remove country code 92, keep the rest
+                        phone_digits = phone_digits[2:]
+                    
+                    # Ensure it starts with 0 (local Pakistan format)
+                    if not phone_digits.startswith('0'):
+                        phone_digits = '0' + phone_digits
+                    
+                    phone = phone_digits
+                else:
+                    skipped += 1
+                    errors.append(f"Row {index + 2}: Invalid phone number format")
+                    continue
+                
                 # Check if contact already exists
                 existing = db.query(Contact).filter(
                     Contact.phone == phone,
