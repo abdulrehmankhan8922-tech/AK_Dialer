@@ -48,9 +48,20 @@ class DialerService:
                 from app.services.channel_tracker import channel_tracker
                 channel_tracker.register_call(call_unique_id)
                 
-                # Customer-First Dialing: Dial customer through trunk, then bridge to agent
-                # Customer channel format: PJSIP/trunk/sip:{phone_number}@10.50.161.239
-                # This matches the dialplan format in extensions.conf
+                # Route call through softphone with auto-connect: Use Local channel to avoid ringing
+                # Flow: Dialer triggers → AMI originates Local channel → Local auto-answers → Dial customer → Bridge to agent
+                # This makes the call appear on softphone without ringing (auto-connected)
+                
+                # Use Local channel that will auto-answer, then dial customer, then bridge to agent
+                # Format: Local/{phone_number}@auto-connect
+                # The Local channel will be handled by auto-connect context which will:
+                # 1. Auto-answer Local channel (no ringing on softphone)
+                # 2. Dial customer through trunk
+                # 3. When customer answers, bridge to agent's softphone (already connected, no ringing)
+                # AGENT_EXTENSION is passed as a variable
+                local_channel = f"Local/{phone_number}@auto-connect"
+                
+                # Customer channel through trunk (for tracking)
                 customer_channel = f"{settings.ASTERISK_TRUNK}/sip:{phone_number}@10.50.161.239"
                 
                 # Variables to pass to the call
@@ -62,18 +73,15 @@ class DialerService:
                     'CONTACT_ID': str(contact_id) if contact_id else '',
                     'CUSTOMER_NUMBER': phone_number,
                     'CUSTOMER_CHANNEL': customer_channel,
-                    'AGENT_EXTENSION': agent_extension  # Pass agent extension to dialplan
+                    'AGENT_EXTENSION': agent_extension
                 }
                 
-                # Originate call using dialplan method:
-                # - Channel: Customer number through trunk (PJSIP/trunk/{number})
-                # - Context: from-internal (our dialplan context)
-                # - Exten: Agent extension (dialplan will use this to bridge to agent)
-                # - Dialplan will: Dial customer first, then bridge to agent when answered
+                # Originate call using Local channel (auto-connects to agent without ringing)
+                # The dialplan will handle: dial customer → when answered → bridge to agent
                 result = await self.asterisk_service.originate_call(
-                    channel=customer_channel,  # Customer number to dial first
-                    context=settings.ASTERISK_CONTEXT,  # from-internal
-                    exten=agent_extension,  # Agent extension (dialplan uses this to bridge)
+                    channel=local_channel,  # Local channel (auto-answers, no ringing on softphone)
+                    context="auto-connect",  # auto-connect context handles the flow
+                    exten=phone_number,  # Customer number (dialplan uses this)
                     priority=1,
                     caller_id=f"Dialer <{phone_number}>",
                     timeout=30000,
@@ -81,11 +89,11 @@ class DialerService:
                 )
                 
                 if result.get("success"):
-                    logger.info(f"Call {call_unique_id} originated: agent {agent_extension} -> {phone_number}")
+                    logger.info(f"Call {call_unique_id} originated FROM softphone {agent_extension} TO {phone_number}")
                     return {
                         "call_unique_id": call_unique_id,
                         "status": CallStatus.DIALING,
-                        "asterisk_channel": customer_channel,  # Primary channel
+                        "asterisk_channel": agent_channel,  # Agent channel (originates from softphone)
                         "action_id": result.get("action_id"),
                         "success": True
                     }

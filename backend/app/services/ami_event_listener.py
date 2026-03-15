@@ -346,13 +346,16 @@ class AMIEventListener:
         # Check if this channel is already tracked
         call_unique_id = channel_tracker.get_call_from_uniqueid(uniqueid)
         
-        # If not tracked, try to auto-detect and create call record
+        # If not tracked, try to find existing call or auto-detect and create call record
         if not call_unique_id:
             db = SessionLocal()
             try:
+                # FIRST: Check if a call already exists with this phone number and agent (preserves contact_id)
+                # This happens when dial endpoint creates the call, then AMI events come in
                 agent = None
                 direction = None
                 phone_number = None
+                existing_call = None
                 
                 # PRIMARY: Detect inbound calls (from trunk) - check context first
                 # Context 'from-trunk' is the most reliable indicator
@@ -393,6 +396,17 @@ class AMIEventListener:
                             agent = db.query(Agent).filter(Agent.phone_extension == extension).first()
                             # Phone number is the dialed number
                             phone_number = exten.lstrip('+')
+                            
+                            # Check if call already exists (created by dial endpoint with contact_id)
+                            if agent and phone_number:
+                                existing_call = db.query(Call).filter(
+                                    Call.agent_id == agent.id,
+                                    Call.phone_number == phone_number,
+                                    Call.direction == CallDirection.OUTBOUND.value,
+                                    Call.status.in_([CallStatus.DIALING.value, CallStatus.RINGING.value]),
+                                    Call.end_time.is_(None)
+                                ).order_by(Call.start_time.desc()).first()
+                            
                             logger.info(f"✓ Detected OUTBOUND call: channel={channel}, context={context}, phone={phone_number}, extension={extension}")
                         else:
                             # This might be an extension channel for an inbound call, skip creating call here
@@ -411,10 +425,37 @@ class AMIEventListener:
                         phone_number = self._extract_phone_number_from_channel(channel, context, exten)
                         if not phone_number and exten:
                             phone_number = exten.lstrip('+')
+                        
+                        # Check if call already exists (created by dial endpoint with contact_id)
+                        if agent and phone_number:
+                            existing_call = db.query(Call).filter(
+                                Call.agent_id == agent.id,
+                                Call.phone_number == phone_number,
+                                Call.direction == CallDirection.OUTBOUND.value,
+                                Call.status.in_([CallStatus.DIALING.value, CallStatus.RINGING.value]),
+                                Call.end_time.is_(None)
+                            ).order_by(Call.start_time.desc()).first()
+                        
                         logger.info(f"✓ Detected OUTBOUND call: channel={channel}, context={context}, phone={phone_number}, extension={extension}")
                 
-                # Only create call record if we have enough info
-                if direction and phone_number and agent:
+                # Use existing call if found (preserves contact_id and campaign_id)
+                if existing_call:
+                    call_unique_id = existing_call.call_unique_id
+                    call = existing_call
+                    logger.info(f"✓ Found existing call {call_unique_id} for {phone_number} (preserving contact_id: {call.contact_id})")
+                    # Register in channel tracker
+                    channel_tracker.register_call(call_unique_id)
+                    # Update channel mapping for existing call
+                    if direction == CallDirection.INBOUND:
+                        call.customer_channel = channel
+                        channel_tracker.set_customer_channel(call_unique_id, channel, uniqueid)
+                    else:
+                        call.agent_channel = channel
+                        channel_tracker.set_agent_channel(call_unique_id, channel, uniqueid)
+                    db.commit()
+                    db.refresh(call)
+                # Only create new call record if we have enough info AND no existing call found
+                elif direction and phone_number and agent:
                     call_unique_id = str(uuid.uuid4())
                     call = Call(
                         agent_id=agent.id,
@@ -443,8 +484,13 @@ class AMIEventListener:
                     
                     db.commit()
                     db.refresh(call)
-                    
-                    # Send WebSocket update
+                else:
+                    # No existing call and not enough info to create one
+                    db.close()
+                    return
+                
+                # Send WebSocket update (for both existing and new calls)
+                if call and agent:
                     await websocket_manager.send_call_update(agent.id, {
                         "call_id": call.id,
                         "status": call.status,
@@ -463,7 +509,10 @@ class AMIEventListener:
                             }
                         }, agent.id)
                     
-                    logger.info(f"Auto-created call record: {call_unique_id} for {direction.value} call from {phone_number} to agent {agent.phone_extension}")
+                    if existing_call:
+                        logger.info(f"Updated existing call record: {call_unique_id} for {direction.value} call from {phone_number} to agent {agent.phone_extension}")
+                    else:
+                        logger.info(f"Auto-created call record: {call_unique_id} for {direction.value} call from {phone_number} to agent {agent.phone_extension}")
                 
             except Exception as e:
                 logger.error(f"Error auto-creating call record: {e}")
@@ -752,11 +801,45 @@ class AMIEventListener:
                         elif call.status == CallStatus.ENDED.value and call.answered_time and call.talk_duration is not None and call.talk_duration > 0:
                             contact.status = ContactStatus.CONTACTED
                             logger.info(f"✅ Contact {contact.id} ({contact.phone}) marked as CONTACTED (normal end with talk time: {call.talk_duration}s) - Moving to dialed list")
-                        # ALL OTHER CASES = FAILED (one attempt only, no retries)
-                        # This includes: BUSY, NOT_ANSWERED, FAILED, ENDED without answer, short duration, no talk time
-                        else:
+                        # Check if max attempts reached (2 attempts max)
+                        current_attempts = (contact.dial_attempts or 0)
+                        if current_attempts >= 2:
+                            # Max attempts reached - mark as FAILED regardless of call result
                             contact.status = ContactStatus.FAILED
-                            logger.info(f"❌ Contact {contact.id} ({contact.phone}) marked as FAILED (status: {call.status}, answered: {bool(call.answered_time)}, talk_duration: {call.talk_duration}, cause: {cause_txt}) - Moving to failed list (one attempt only)")
+                            logger.info(f"❌ Contact {contact.id} ({contact.phone}) marked as FAILED (max 2 attempts reached: {current_attempts}) - Moving to failed list")
+                        # ALL OTHER CASES = Check if should mark as FAILED or allow retry
+                        # This includes: NO_ANSWER, BUSY, FAILED, ENDED without answer, short duration, no talk time
+                        # Explicitly handle NO_ANSWER, BUSY, and all failure statuses
+                        elif call.status in [CallStatus.NO_ANSWER.value, CallStatus.BUSY.value, CallStatus.FAILED.value]:
+                            # If this is attempt 2, mark as FAILED. Otherwise, keep as NEW for retry
+                            if current_attempts >= 2:
+                                contact.status = ContactStatus.FAILED
+                                status_name = "NO_ANSWER" if call.status == CallStatus.NO_ANSWER.value else ("BUSY" if call.status == CallStatus.BUSY.value else "FAILED")
+                                logger.info(f"❌ Contact {contact.id} ({contact.phone}) marked as FAILED (status: {status_name}, attempts: {current_attempts}/2, cause: {cause_txt}) - Moving to failed list")
+                            else:
+                                # Keep as NEW for retry (attempt 1 failed, will retry on attempt 2)
+                                logger.info(f"⚠️ Contact {contact.id} ({contact.phone}) attempt {current_attempts}/2 failed (status: {call.status}), will retry")
+                        # ENDED without answer or talk time = FAILED (if 2 attempts) or retry
+                        elif call.status == CallStatus.ENDED.value and (not call.answered_time or call.talk_duration is None or call.talk_duration == 0):
+                            if current_attempts >= 2:
+                                contact.status = ContactStatus.FAILED
+                                logger.info(f"❌ Contact {contact.id} ({contact.phone}) marked as FAILED (ENDED without answer/talk time, attempts: {current_attempts}/2) - Moving to failed list")
+                            else:
+                                logger.info(f"⚠️ Contact {contact.id} ({contact.phone}) attempt {current_attempts}/2 ended without answer, will retry")
+                        # DIALING/RINGING that ended without answer = FAILED (if 2 attempts) or retry
+                        elif call.status in [CallStatus.DIALING.value, CallStatus.RINGING.value] and not call.answered_time:
+                            if current_attempts >= 2:
+                                contact.status = ContactStatus.FAILED
+                                logger.info(f"❌ Contact {contact.id} ({contact.phone}) marked as FAILED (status: {call.status} without answer, attempts: {current_attempts}/2) - Moving to failed list")
+                            else:
+                                logger.info(f"⚠️ Contact {contact.id} ({contact.phone}) attempt {current_attempts}/2 failed (status: {call.status}), will retry")
+                        # Default: Any other case = FAILED (if 2 attempts) or retry
+                        else:
+                            if current_attempts >= 2:
+                                contact.status = ContactStatus.FAILED
+                                logger.info(f"❌ Contact {contact.id} ({contact.phone}) marked as FAILED (status: {call.status}, attempts: {current_attempts}/2, answered: {bool(call.answered_time)}, talk_duration: {call.talk_duration}, cause: {cause_txt}) - Moving to failed list")
+                            else:
+                                logger.info(f"⚠️ Contact {contact.id} ({contact.phone}) attempt {current_attempts}/2 failed, will retry")
                         # Note: contact.last_dialed_at and dial_attempts are updated in dial endpoint
                 
                 # Update agent status

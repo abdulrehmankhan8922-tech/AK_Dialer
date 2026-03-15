@@ -53,18 +53,24 @@ async def dial(
             elif active_call.answered_time:
                 time_diff = (current_time - active_call.answered_time).total_seconds()
             
-            # Check if call is stuck in DIALING (older than 30 seconds)
+            # Check if call is stuck in DIALING (older than 30 seconds) - mark as FAILED
             if active_call.status == CallStatus.DIALING.value and time_diff and time_diff > 30:
                 logger.warning(f"Clearing stuck DIALING call {active_call.id} for agent {agent_id} (age: {time_diff}s)")
                 active_call.status = CallStatus.FAILED.value
                 active_call.end_time = current_time
+                if active_call.start_time:
+                    active_call.duration = int((active_call.end_time - active_call.start_time).total_seconds())
                 # Update agent status
                 agent.status = AgentStatus.AVAILABLE.value
-                # Update contact status if exists
+                # Update contact status if exists - check attempts
                 if active_call.contact_id:
                     contact = db.query(Contact).filter(Contact.id == active_call.contact_id).first()
                     if contact:
-                        contact.status = ContactStatus.FAILED
+                        current_attempts = (contact.dial_attempts or 0)
+                        if current_attempts >= 2:
+                            contact.status = ContactStatus.FAILED
+                            logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (stuck DIALING, max attempts: {current_attempts}/2)")
+                        # Otherwise keep as NEW for retry
                 db.commit()
                 # Continue with new call
             # Check if call is stuck in CONNECTED/ANSWERED (older than 2 hours - likely stale)
@@ -85,18 +91,26 @@ async def dial(
                             contact.status = ContactStatus.FAILED
                 db.commit()
                 # Continue with new call
-            # Check if call is in RINGING for too long (older than 30 seconds)
+            # Check if call is in RINGING for too long (older than 30 seconds) - mark as FAILED
             elif active_call.status == CallStatus.RINGING.value and time_diff and time_diff > 30:
-                logger.warning(f"Clearing stuck RINGING call {active_call.id} for agent {agent_id} (age: {time_diff}s)")
-                active_call.status = CallStatus.NO_ANSWER.value
+                logger.warning(f"Clearing stuck RINGING call {active_call.id} for agent {agent_id} (age: {time_diff}s) - 30s timeout")
+                active_call.status = CallStatus.FAILED.value  # Mark as FAILED (not NO_ANSWER) for consistency
                 active_call.end_time = current_time
+                if active_call.start_time:
+                    active_call.duration = int((active_call.end_time - active_call.start_time).total_seconds())
+                if active_call.ring_time:
+                    active_call.ring_duration = int((active_call.end_time - active_call.ring_time).total_seconds())
                 # Update agent status
                 agent.status = AgentStatus.AVAILABLE.value
-                # Update contact status if exists
+                # Update contact status if exists - check attempts
                 if active_call.contact_id:
                     contact = db.query(Contact).filter(Contact.id == active_call.contact_id).first()
                     if contact:
-                        contact.status = ContactStatus.FAILED
+                        current_attempts = (contact.dial_attempts or 0)
+                        if current_attempts >= 2:
+                            contact.status = ContactStatus.FAILED
+                            logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (30s ring timeout, max attempts: {current_attempts}/2)")
+                        # Otherwise keep as NEW for retry
                 db.commit()
                 # Continue with new call
             else:
@@ -111,9 +125,21 @@ async def dial(
         if dial_request.contact_id and not dial_request.softphone_dial:
             contact = db.query(Contact).filter(Contact.id == dial_request.contact_id).first()
             if contact:
+                # Check max attempts (2 attempts max per contact)
+                current_attempts = (contact.dial_attempts or 0)
+                if current_attempts >= 2:
+                    # Max attempts reached - mark as FAILED
+                    contact.status = ContactStatus.FAILED
+                    contact.last_dialed_at = datetime.now(timezone.utc)
+                    db.commit()
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Contact {contact.phone} has reached maximum attempts (2). Contact marked as FAILED."
+                    )
+                
                 # Update contact dialing info
                 contact.last_dialed_at = datetime.now(timezone.utc)
-                contact.dial_attempts = (contact.dial_attempts or 0) + 1
+                contact.dial_attempts = current_attempts + 1
                 # Don't change status yet - will update based on call result
         
         # Create call record
@@ -131,23 +157,63 @@ async def dial(
         db.flush()  # Flush to get the ID without committing
         
         # Initiate call via dialer service
-        call_result = await dialer_service.initiate_call(
-            phone_number=dial_request.phone_number,
-            agent_extension=agent.phone_extension,
-            campaign_id=None if dial_request.softphone_dial else dial_request.campaign_id,
-            contact_id=None if dial_request.softphone_dial else dial_request.contact_id
-        )
-        
-        # Update call status
-        call.status = call_result.get("status", CallStatus.DIALING)
-        call.freeswitch_channel = call_result.get("asterisk_channel") or call_result.get("freeswitch_channel")
-        
-        # Update agent status
-        agent.status = AgentStatus.IN_CALL.value
-        
-        # Single commit for all changes
-        db.commit()
-        db.refresh(call)
+        try:
+            call_result = await dialer_service.initiate_call(
+                phone_number=dial_request.phone_number,
+                agent_extension=agent.phone_extension,
+                campaign_id=None if dial_request.softphone_dial else dial_request.campaign_id,
+                contact_id=None if dial_request.softphone_dial else dial_request.contact_id
+            )
+            
+            # Check if call initiation failed
+            if not call_result.get("success", False):
+                # Call initiation failed - mark call as FAILED
+                call.status = CallStatus.FAILED.value
+                call.end_time = datetime.now(timezone.utc)
+                if call.start_time:
+                    call.duration = int((call.end_time - call.start_time).total_seconds())
+                # Update contact if exists
+                if contact:
+                    current_attempts = (contact.dial_attempts or 0)
+                    if current_attempts >= 2:
+                        contact.status = ContactStatus.FAILED
+                agent.status = AgentStatus.AVAILABLE.value
+                db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Call initiation failed: {call_result.get('error', 'Unknown error')}"
+                )
+            
+            # Update call status
+            call.status = call_result.get("status", CallStatus.DIALING)
+            call.freeswitch_channel = call_result.get("asterisk_channel") or call_result.get("freeswitch_channel")
+            
+            # Update agent status
+            agent.status = AgentStatus.IN_CALL.value
+            
+            # Single commit for all changes
+            db.commit()
+            db.refresh(call)
+        except HTTPException:
+            raise
+        except Exception as e:
+            # If call initiation fails, mark call as FAILED
+            logger.error(f"Error initiating call: {e}", exc_info=True)
+            call.status = CallStatus.FAILED.value
+            call.end_time = datetime.now(timezone.utc)
+            if call.start_time:
+                call.duration = int((call.end_time - call.start_time).total_seconds())
+            # Update contact if exists
+            if contact:
+                current_attempts = (contact.dial_attempts or 0)
+                if current_attempts >= 2:
+                    contact.status = ContactStatus.FAILED
+            agent.status = AgentStatus.AVAILABLE.value
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error initiating call: {str(e)}"
+            )
         
         # Register call in channel tracker
         from app.services.channel_tracker import channel_tracker
