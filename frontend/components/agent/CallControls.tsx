@@ -29,9 +29,12 @@ export default function CallControls({
   const [showTransferModal, setShowTransferModal] = useState(false)
   const [dialingStatus, setDialingStatus] = useState('')
 
-  // Clear manual dial number when call ends (but keep it during call to show the dialed number)
+  // Update manual dial number to show current call's phone number (for both inbound and outbound)
   useEffect(() => {
-    if (!currentCall) {
+    if (currentCall && currentCall.phone_number) {
+      // Always show the phone number from the current call
+      setManualDialNumber(currentCall.phone_number)
+    } else if (!currentCall) {
       // Clear the input when call ends
       setManualDialNumber('')
     }
@@ -43,13 +46,19 @@ export default function CallControls({
       return
     }
 
-    setLoading(true)
+      setLoading(true)
     try {
       await callsAPI.dial(manualDialNumber)
-      setManualDialNumber('')
+      // Don't clear manualDialNumber - keep it to show the dialed number
+      // Immediately update call to show it on dialer
       onCallUpdate()
+      // Also reload after a short delay to ensure backend has processed
+      setTimeout(() => {
+        onCallUpdate()
+      }, 500)
     } catch (error: any) {
       alert(error.response?.data?.detail || 'Error making call')
+      setManualDialNumber('') // Clear on error
     } finally {
       setLoading(false)
     }
@@ -184,8 +193,12 @@ export default function CallControls({
       setDialingStatus(`Dialing ${nextContact.phone}...`)
       await callsAPI.dial(nextContact.phone, selectedCampaignId, nextContact.id)
       setDialingStatus('')
-      // The input will now show currentCall.phone_number automatically
+      // Immediately update call to show it on dialer
       onCallUpdate()
+      // Also reload after a short delay to ensure backend has processed
+      setTimeout(() => {
+        onCallUpdate()
+      }, 500)
       onStatsUpdate()
     } catch (error: any) {
       setDialingStatus('')
@@ -221,6 +234,14 @@ export default function CallControls({
         <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
           Manual Dial
         </label>
+        {/* Display contact name if available */}
+        {currentCall?.contact_name && (
+          <div className="mb-2 px-3 py-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+            <p className="text-sm font-medium text-blue-900 dark:text-blue-200">
+              {currentCall.contact_name}
+            </p>
+          </div>
+        )}
         <div className="flex space-x-3">
           <input
             type="text"

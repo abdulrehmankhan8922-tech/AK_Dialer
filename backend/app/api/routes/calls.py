@@ -111,9 +111,19 @@ async def dial(
         if dial_request.contact_id and not dial_request.softphone_dial:
             contact = db.query(Contact).filter(Contact.id == dial_request.contact_id).first()
             if contact:
-                # Update contact dialing info
+                current_attempts = (contact.dial_attempts or 0)
+                # If this is the third attempt (dial_attempts == 2), mark as FAILED and block dial
+                if current_attempts >= 2:
+                    contact.status = ContactStatus.FAILED
+                    contact.last_dialed_at = datetime.now(timezone.utc)
+                    db.commit()
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Contact {contact.phone} has reached maximum dial attempts (2). Contact marked as FAILED."
+                    )
+                # Update contact dialing info (increment attempts)
                 contact.last_dialed_at = datetime.now(timezone.utc)
-                contact.dial_attempts = (contact.dial_attempts or 0) + 1
+                contact.dial_attempts = current_attempts + 1
                 # Don't change status yet - will update based on call result
         
         # Create call record
@@ -165,7 +175,19 @@ async def dial(
         except Exception as ws_error:
             logger.warning(f"WebSocket update failed: {ws_error}")
         
-        return CallResponse.model_validate(call)
+        # Get contact name if contact exists
+        contact_name = None
+        if call.contact_id:
+            contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+            if contact:
+                contact_name = contact.name
+        
+        # Create response with contact name
+        call_dict = {
+            **CallResponse.model_validate(call).model_dump(),
+            "contact_name": contact_name
+        }
+        return CallResponse.model_validate(call_dict)
     except HTTPException:
         raise
     except Exception as e:
@@ -468,7 +490,8 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
         dialing_timeout = datetime.now(timezone.utc) - timedelta(seconds=30)  # 30 seconds timeout for DIALING
         
-        call = db.query(Call).filter(
+        # Query call with contact join to get contact name
+        call = db.query(Call).outerjoin(Contact, Call.contact_id == Contact.id).filter(
             Call.agent_id == agent_id,
             Call.status.in_(active_statuses),
             Call.end_time.is_(None),  # Must not have end_time
@@ -486,16 +509,34 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
             elif call.answered_time:
                 time_diff = (current_time - call.answered_time).total_seconds()
             
-            # Check if call is stuck in DIALING (older than 30 seconds)
-            if call.status == CallStatus.DIALING.value and time_diff and time_diff > 30:
-                logger.warning(f"Call {call.id} stuck in DIALING status for more than 30 seconds, marking as failed")
+            # Check if call is stuck in DIALING (older than 30 seconds) - IMMEDIATE CLEAR
+            if call.status == CallStatus.DIALING.value and time_diff and time_diff >= 30:
+                logger.warning(f"🚨 Call {call.id} stuck in DIALING status for {time_diff}s (>=30s), IMMEDIATELY marking as FAILED")
                 call.status = CallStatus.FAILED.value
                 call.end_time = current_time
+                if call.start_time:
+                    call.duration = int(time_diff)
+                # Update contact status
+                if call.contact_id:
+                    contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+                    if contact:
+                        # Only mark as FAILED if dial_attempts >= 2, otherwise keep as NEW for retry
+                        if (contact.dial_attempts or 0) >= 2:
+                            contact.status = ContactStatus.FAILED
+                            logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (30s dialing timeout, max attempts reached)")
+                        else:
+                            logger.info(f"Contact {contact.id} ({contact.phone}) call timed out (30s dialing), keeping as NEW for retry (attempts: {contact.dial_attempts})")
                 # Update agent status
                 agent = db.query(Agent).filter(Agent.id == agent_id).first()
                 if agent:
                     agent.status = AgentStatus.AVAILABLE.value
                 db.commit()
+                # Try to hangup the call via Asterisk
+                try:
+                    from app.services.dialer_service import dialer_service
+                    await dialer_service.hangup_call(call.call_unique_id)
+                except Exception as hangup_error:
+                    logger.warning(f"Could not hangup stuck call via Asterisk: {hangup_error}")
                 return {"call": None}
             # Check if call is stuck in CONNECTED/ANSWERED (older than 2 hours)
             elif call.status in [CallStatus.CONNECTED.value, CallStatus.ANSWERED.value] and time_diff and time_diff > 7200:
@@ -508,7 +549,6 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
                     agent.status = AgentStatus.AVAILABLE.value
                 # Update contact status if exists
                 if call.contact_id:
-                    from app.models.contact import Contact, ContactStatus
                     contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
                     if contact:
                         if call.answered_time and call.talk_duration and call.talk_duration > 0:
@@ -528,7 +568,6 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
                     agent.status = AgentStatus.AVAILABLE.value
                 # Update contact status if exists
                 if call.contact_id:
-                    from app.models.contact import Contact, ContactStatus
                     contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
                     if contact:
                         contact.status = ContactStatus.NOT_ANSWERED
@@ -550,7 +589,19 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
         if not call:
             return {"call": None}
         
-        return {"call": CallResponse.model_validate(call)}
+        # Get contact name if contact exists
+        contact_name = None
+        if call.contact_id:
+            contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+            if contact:
+                contact_name = contact.name
+        
+        # Create response with contact name
+        call_dict = {
+            **CallResponse.model_validate(call).model_dump(),
+            "contact_name": contact_name
+        }
+        return {"call": CallResponse.model_validate(call_dict)}
     except Exception as e:
         logger.error(f"Error getting current call: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error fetching current call")

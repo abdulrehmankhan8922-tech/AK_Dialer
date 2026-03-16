@@ -19,6 +19,7 @@ class CallResponse(CallBase):
     agent_id: Optional[int]
     campaign_id: Optional[int]
     contact_id: Optional[int]
+    contact_name: Optional[str] = None  # Contact name if contact exists
     status: CallStatus
     start_time: datetime
     ring_time: Optional[datetime] = None

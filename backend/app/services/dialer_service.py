@@ -26,16 +26,18 @@ class DialerService:
         """
         Initiate a call via Asterisk - CUSTOMER-FIRST DIALING (Vicidial Style)
         
-        Flow:
-        1. Dial customer's number through trunk
-        2. When customer answers, bridge to agent's softphone
-        3. Agent's softphone receives call (audio only)
-        4. All controls remain in web dialer
+        Matches dialplan format:
+        - Channel: PJSIP/trunk/sip:{customer_number}@10.50.161.239
+        - Context: from-internal
+        - Exten: {agent_extension} (e.g., 8013 or 8014)
+        - Variables: AGENT_EXTENSION={agent_extension}
         
-        This matches the Vicidial workflow where:
-        - Softphone is registered but only handles audio
-        - All call controls are in the web dialer
-        - Customer gets call immediately (not agent first)
+        Flow:
+        1. AMI Originate creates channel to customer (customer's phone rings)
+        2. Dialplan at agent extension receives the customer channel
+        3. When customer answers, Local channel auto-connects to agent
+        4. Agent's softphone receives call (minimal/no ringing)
+        5. All controls remain in web dialer
         """
         call_unique_id = str(uuid.uuid4())
         
@@ -48,9 +50,8 @@ class DialerService:
                 from app.services.channel_tracker import channel_tracker
                 channel_tracker.register_call(call_unique_id)
                 
-                # Customer-First Dialing: Dial customer through trunk, then bridge to agent
                 # Customer channel format: PJSIP/trunk/sip:{phone_number}@10.50.161.239
-                # This matches the dialplan format in extensions.conf
+                # This matches the dialplan's expectation for AMI-originated calls
                 customer_channel = f"{settings.ASTERISK_TRUNK}/sip:{phone_number}@10.50.161.239"
                 
                 # Variables to pass to the call
@@ -62,30 +63,30 @@ class DialerService:
                     'CONTACT_ID': str(contact_id) if contact_id else '',
                     'CUSTOMER_NUMBER': phone_number,
                     'CUSTOMER_CHANNEL': customer_channel,
-                    'AGENT_EXTENSION': agent_extension  # Pass agent extension to dialplan
+                    'AGENT_EXTENSION': agent_extension,  # Pass agent extension as variable
                 }
                 
-                # Originate call using dialplan method:
-                # - Channel: Customer number through trunk (PJSIP/trunk/{number})
-                # - Context: from-internal (our dialplan context)
-                # - Exten: Agent extension (dialplan will use this to bridge to agent)
-                # - Dialplan will: Dial customer first, then bridge to agent when answered
+                # Originate call matching dialplan format:
+                # - Channel: PJSIP/trunk/sip:{phone_number}@10.50.161.239 (customer channel)
+                # - Context: from-internal
+                # - Exten: {agent_extension} (dialplan uses this to identify agent)
+                # - Dialplan will: Detect AMI call → Wait for customer answer → Auto-connect to agent
                 result = await self.asterisk_service.originate_call(
-                    channel=customer_channel,  # Customer number to dial first
+                    channel=customer_channel,  # PJSIP/trunk/sip:{phone_number}@10.50.161.239
                     context=settings.ASTERISK_CONTEXT,  # from-internal
-                    exten=agent_extension,  # Agent extension (dialplan uses this to bridge)
+                    exten=agent_extension,  # Agent extension (dialplan uses this)
                     priority=1,
                     caller_id=f"Dialer <{phone_number}>",
-                    timeout=30000,
+                    timeout=60000,  # 60 seconds timeout (matches dialplan)
                     variables=variables
                 )
                 
                 if result.get("success"):
-                    logger.info(f"Call {call_unique_id} originated: agent {agent_extension} -> {phone_number}")
+                    logger.info(f"Call {call_unique_id} originated: customer {phone_number} -> agent {agent_extension}")
                     return {
                         "call_unique_id": call_unique_id,
                         "status": CallStatus.DIALING,
-                        "asterisk_channel": customer_channel,  # Primary channel
+                        "asterisk_channel": customer_channel,  # Primary channel is customer channel
                         "action_id": result.get("action_id"),
                         "success": True
                     }

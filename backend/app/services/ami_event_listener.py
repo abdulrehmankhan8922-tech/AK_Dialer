@@ -414,49 +414,71 @@ class AMIEventListener:
                         logger.info(f"✓ Detected OUTBOUND call: channel={channel}, context={context}, phone={phone_number}, extension={extension}")
                 
                 # Only create call record if we have enough info
-                if direction and phone_number and agent:
-                    call_unique_id = str(uuid.uuid4())
-                    call = Call(
-                        agent_id=agent.id,
-                        phone_number=phone_number,
-                        direction=direction.value,
-                        status=CallStatus.DIALING.value,
-                        call_unique_id=call_unique_id,
-                        start_time=datetime.now(timezone.utc)
-                    )
-                    db.add(call)
-                    db.commit()
-                    db.refresh(call)
+                # IMPORTANT: Only create if phone_number is valid (not empty, not a single character, not an extension)
+                if direction and phone_number and agent and len(phone_number) > 1 and phone_number not in ['8013', '8014', '9000']:
+                    # Check if call already exists (avoid duplicates)
+                    existing_call = db.query(Call).filter(
+                        Call.agent_id == agent.id,
+                        Call.status.in_([CallStatus.DIALING.value, CallStatus.RINGING.value, CallStatus.CONNECTED.value, CallStatus.ANSWERED.value]),
+                        Call.end_time.is_(None)
+                    ).first()
                     
-                    # Register in channel tracker
-                    channel_tracker.register_call(call_unique_id)
-                    
-                    # Determine if this is agent or customer channel
-                    if direction == CallDirection.INBOUND:
-                        # Inbound: trunk channel is customer, extension channel is agent
-                        call.customer_channel = channel
-                        channel_tracker.set_customer_channel(call_unique_id, channel, uniqueid)
+                    if existing_call:
+                        # Update existing call's phone_number if it's empty or invalid
+                        if not existing_call.phone_number or len(existing_call.phone_number) <= 1:
+                            existing_call.phone_number = phone_number
+                            db.commit()
+                            call_unique_id = existing_call.call_unique_id
+                            logger.info(f"Updated existing call {call_unique_id} phone_number to {phone_number}")
+                        else:
+                            # Use existing call
+                            call_unique_id = existing_call.call_unique_id
+                            logger.debug(f"Using existing call {call_unique_id} with phone_number {existing_call.phone_number}")
                     else:
-                        # Outbound: extension channel is agent
-                        call.agent_channel = channel
-                        channel_tracker.set_agent_channel(call_unique_id, channel, uniqueid)
+                        call_unique_id = str(uuid.uuid4())
+                        call = Call(
+                            agent_id=agent.id,
+                            phone_number=phone_number,
+                            direction=direction.value,
+                            status=CallStatus.DIALING.value,
+                            call_unique_id=call_unique_id,
+                            start_time=datetime.now(timezone.utc)
+                        )
+                        db.add(call)
+                        db.commit()
+                        db.refresh(call)
                     
-                    db.commit()
-                    db.refresh(call)
+                        # Register in channel tracker
+                        channel_tracker.register_call(call_unique_id)
+                        
+                        # Determine if this is agent or customer channel
+                        if direction == CallDirection.INBOUND:
+                            # Inbound: trunk channel is customer, extension channel is agent
+                            call.customer_channel = channel
+                            channel_tracker.set_customer_channel(call_unique_id, channel, uniqueid)
+                        else:
+                            # Outbound: extension channel is agent
+                            call.agent_channel = channel
+                            channel_tracker.set_agent_channel(call_unique_id, channel, uniqueid)
+                        
+                        db.commit()
+                        db.refresh(call)
                     
-                    # Send WebSocket update
-                    await websocket_manager.send_call_update(agent.id, {
-                        "call_id": call.id,
-                        "status": call.status,
-                        "phone_number": call.phone_number,
-                        "direction": call.direction
-                    })
-                    
-                    # Send incoming call notification for inbound calls
-                    if direction == CallDirection.INBOUND:
-                        await websocket_manager.send_personal_message({
-                            "type": "incoming_call",
-                            "data": {
+                        # Send WebSocket update for new call (ALWAYS send for new calls)
+                        await websocket_manager.send_call_update(agent.id, {
+                            "call_id": call.id,
+                            "status": call.status,
+                            "phone_number": call.phone_number,
+                            "direction": call.direction,
+                            "start_time": call.start_time.isoformat() if call.start_time else None
+                        })
+                        logger.info(f"📞 New call created: {call_unique_id} - {call.phone_number} ({call.direction}) - Status: {call.status} (sent WebSocket update to agent {agent.id})")
+                        
+                        # Send incoming call notification for inbound calls
+                        if direction == CallDirection.INBOUND:
+                            await websocket_manager.send_personal_message({
+                                "type": "incoming_call",
+                                "data": {
                                 "call_id": call.id,
                                 "phone_number": call.phone_number,
                                 "direction": call.direction
@@ -531,6 +553,50 @@ class AMIEventListener:
             if not call:
                 return
             
+            # Check if call is stuck in DIALING status for more than 30 seconds
+            # This ensures calls don't get stuck and automatically move to next contact
+            # Check this on EVERY state event, not just when status changes
+            if call.status == CallStatus.DIALING.value and call.start_time:
+                dialing_duration = (datetime.now(timezone.utc) - call.start_time).total_seconds()
+                if dialing_duration >= 30:
+                    logger.warning(f"Call {call_unique_id} stuck in DIALING status for {dialing_duration}s (>30s), marking as FAILED and moving to next contact")
+                    call.status = CallStatus.FAILED.value
+                    call.end_time = datetime.now(timezone.utc)
+                    if call.start_time:
+                        call.duration = int(dialing_duration)
+                    # Update contact status
+                    if call.contact_id:
+                        from app.models.contact import Contact, ContactStatus
+                        contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+                        if contact:
+                            # Only mark as FAILED if dial_attempts >= 2, otherwise keep as NEW for retry
+                            if (contact.dial_attempts or 0) >= 2:
+                                contact.status = ContactStatus.FAILED
+                                logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (30s dialing timeout, max attempts reached)")
+                            else:
+                                logger.info(f"Contact {contact.id} ({contact.phone}) call timed out (30s dialing), keeping as NEW for retry (attempts: {contact.dial_attempts})")
+                    # Update agent status to AVAILABLE (so auto-dial can continue)
+                    if call.agent_id:
+                        agent = db.query(Agent).filter(Agent.id == call.agent_id).first()
+                        if agent:
+                            agent.status = AgentStatus.AVAILABLE.value
+                    db.commit()
+                    # Send WebSocket update
+                    if call.agent_id:
+                        await websocket_manager.send_call_update(call.agent_id, {
+                            "call_id": call.id,
+                            "status": call.status,
+                            "phone_number": call.phone_number
+                        })
+                        await websocket_manager.send_agent_status_update(call.agent_id, "available")
+                    # Try to hangup the call
+                    try:
+                        from app.services.dialer_service import dialer_service
+                        await dialer_service.hangup_call(call.call_unique_id)
+                    except Exception as hangup_error:
+                        logger.warning(f"Failed to hangup timed-out call: {hangup_error}")
+                    return
+            
             # Map Asterisk channel states to call status
             # 0 = Down, 1 = Reserved, 2 = OffHook, 3 = Dialing, 4 = Ring, 5 = Ringing, 6 = Up
             state_map = {
@@ -541,7 +607,10 @@ class AMIEventListener:
             }
             
             new_status = state_map.get(state)
-            if new_status and call.status != new_status.value:
+            # ALWAYS send update if status changed OR if state changed (even if status is same)
+            # This ensures frontend gets all state transitions
+            status_changed = new_status and call.status != new_status.value
+            if status_changed:
                 old_status = call.status
                 call.status = new_status.value
                 
@@ -560,13 +629,17 @@ class AMIEventListener:
                         if call.start_time:
                             call.duration = int((call.end_time - call.start_time).total_seconds())
                         call.ring_duration = int(ring_duration)
-                        # Update contact status to FAILED
+                        # Update contact status
                         if call.contact_id:
                             from app.models.contact import Contact, ContactStatus
                             contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
                             if contact:
-                                contact.status = ContactStatus.FAILED
-                                logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (30s ring timeout) - Will move to failed list")
+                                # Only mark as FAILED if dial_attempts >= 2, otherwise keep as NEW for retry
+                                if (contact.dial_attempts or 0) >= 2:
+                                    contact.status = ContactStatus.FAILED
+                                    logger.info(f"Contact {contact.id} ({contact.phone}) marked as FAILED (30s ring timeout, max attempts reached) - Will move to failed list")
+                                else:
+                                    logger.info(f"Contact {contact.id} ({contact.phone}) call timed out (30s ring), keeping as NEW for retry (attempts: {contact.dial_attempts})")
                         # Update agent status to AVAILABLE (so auto-dial can continue)
                         if call.agent_id:
                             agent = db.query(Agent).filter(Agent.id == call.agent_id).first()
@@ -590,13 +663,15 @@ class AMIEventListener:
                         return
                 
                 # Track answered time (when call is connected/answered)
+                # Update status to ANSWERED when connected (customer picked up)
                 if new_status == CallStatus.CONNECTED and not call.answered_time:
+                    call.status = CallStatus.ANSWERED.value  # Change to ANSWERED when customer picks up
                     call.answered_time = datetime.now(timezone.utc)
                     # Calculate ring duration
                     if call.ring_time:
                         ring_duration = (call.answered_time - call.ring_time).total_seconds()
                         call.ring_duration = int(ring_duration)
-                        logger.info(f"Call {call_unique_id} answered after {call.ring_duration}s of ringing")
+                        logger.info(f"Call {call_unique_id} answered after {call.ring_duration}s of ringing - Status: ANSWERED")
                 
                 # Update agent status
                 if call.agent_id:
@@ -609,17 +684,20 @@ class AMIEventListener:
                 
                 db.commit()
                 
-                # Send WebSocket update
+                # Send WebSocket update for EVERY status change (dialing, ringing, connected, answered)
+                # This ensures frontend always receives all events
                 if call.agent_id:
                     await websocket_manager.send_call_update(call.agent_id, {
                         "call_id": call.id,
                         "status": call.status,
                         "phone_number": call.phone_number,
                         "direction": call.direction,
-                        "old_status": old_status
+                        "old_status": old_status,
+                        "ring_time": call.ring_time.isoformat() if call.ring_time else None,
+                        "answered_time": call.answered_time.isoformat() if call.answered_time else None
                     })
                     
-                    logger.info(f"Call {call_unique_id} status changed: {old_status} -> {call.status}")
+                    logger.info(f"📞 Call {call_unique_id} status changed: {old_status} -> {call.status} (sent WebSocket update to agent {call.agent_id})")
         
         except Exception as e:
             logger.error(f"Error handling Newstate event: {e}")
@@ -733,11 +811,11 @@ class AMIEventListener:
                 elif cause_code > 0:
                     call.status = CallStatus.FAILED.value
                 
-                # Update contact status based on call result (One attempt per contact - Pakistan industry standard)
-                # Rule: Each contact is dialed ONCE
+                # Update contact status based on call result
+                # Rule: Contact can be dialed up to 2 times (max 2 attempts)
                 # - If successful (answered and talked) → CONTACTED → move to dialed list
-                # - If failed (any failure) → FAILED → move to failed list
-                # - No retries - one attempt only
+                # - If failed AND dial_attempts >= 2 → FAILED → move to failed list (no more retries)
+                # - If failed AND dial_attempts < 2 → Keep as NEW (allow retry)
                 if call.contact_id:
                     from app.models.contact import Contact, ContactStatus
                     contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
@@ -752,11 +830,15 @@ class AMIEventListener:
                         elif call.status == CallStatus.ENDED.value and call.answered_time and call.talk_duration is not None and call.talk_duration > 0:
                             contact.status = ContactStatus.CONTACTED
                             logger.info(f"✅ Contact {contact.id} ({contact.phone}) marked as CONTACTED (normal end with talk time: {call.talk_duration}s) - Moving to dialed list")
-                        # ALL OTHER CASES = FAILED (one attempt only, no retries)
-                        # This includes: BUSY, NOT_ANSWERED, FAILED, ENDED without answer, short duration, no talk time
+                        # FAILED cases: Only mark as FAILED if dial_attempts >= 2 (third attempt failed)
+                        # If dial_attempts < 2, keep as NEW to allow retry
                         else:
-                            contact.status = ContactStatus.FAILED
-                            logger.info(f"❌ Contact {contact.id} ({contact.phone}) marked as FAILED (status: {call.status}, answered: {bool(call.answered_time)}, talk_duration: {call.talk_duration}, cause: {cause_txt}) - Moving to failed list (one attempt only)")
+                            if (contact.dial_attempts or 0) >= 2:
+                                contact.status = ContactStatus.FAILED
+                                logger.info(f"❌ Contact {contact.id} ({contact.phone}) marked as FAILED (status: {call.status}, dial_attempts: {contact.dial_attempts}, cause: {cause_txt}) - Max attempts reached, moving to failed list")
+                            else:
+                                # Keep as NEW to allow retry (don't change status)
+                                logger.info(f"⚠️ Contact {contact.id} ({contact.phone}) call failed (status: {call.status}, dial_attempts: {contact.dial_attempts}), keeping as NEW for retry")
                         # Note: contact.last_dialed_at and dial_attempts are updated in dial endpoint
                 
                 # Update agent status
@@ -950,6 +1032,7 @@ class AMIEventListener:
                             logger.info(f"Updated inbound call {call_unique_id} to agent {extension}")
                         
                         # Update status to RINGING if not already
+                        old_status = call.status
                         if call.status not in [CallStatus.RINGING.value, CallStatus.CONNECTED.value, CallStatus.ANSWERED.value]:
                             call.status = CallStatus.RINGING.value
                             if not call.ring_time:
@@ -957,13 +1040,16 @@ class AMIEventListener:
                         
                         db.commit()
                         
-                        # Send WebSocket update with proper direction
+                        # Send WebSocket update with proper direction (ALWAYS send update for status changes)
                         await websocket_manager.send_call_update(agent.id, {
                             "call_id": call.id,
                             "status": call.status,
                             "phone_number": call.phone_number,
-                            "direction": CallDirection.INBOUND.value
+                            "direction": CallDirection.INBOUND.value,
+                            "old_status": old_status,
+                            "ring_time": call.ring_time.isoformat() if call.ring_time else None
                         })
+                        logger.info(f"📞 Inbound call {call_unique_id} status: {old_status} -> {call.status} (sent WebSocket update to agent {agent.id})")
                         
                         # Send incoming call notification
                         await websocket_manager.send_personal_message({
@@ -1063,8 +1149,19 @@ class AMIEventListener:
                     # Update call status based on DialStatus
                     if dial_status == 'ANSWER':
                         call.status = CallStatus.ANSWERED.value
+                        # Set answered_time if not already set
                         if not call.answered_time:
                             call.answered_time = datetime.now(timezone.utc)
+                            # Calculate ring duration
+                            if call.ring_time:
+                                ring_duration = (call.answered_time - call.ring_time).total_seconds()
+                                call.ring_duration = int(ring_duration)
+                                logger.info(f"Call {call_unique_id} answered after {call.ring_duration}s of ringing")
+                        # Update agent status to IN_CALL
+                        if call.agent_id:
+                            agent = db.query(Agent).filter(Agent.id == call.agent_id).first()
+                            if agent:
+                                agent.status = AgentStatus.IN_CALL.value
                     elif dial_status in ['BUSY', 'BUSYLINE']:
                         call.status = CallStatus.BUSY.value
                     elif dial_status in ['NOANSWER', 'NO ANSWER']:

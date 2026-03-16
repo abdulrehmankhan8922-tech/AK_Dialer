@@ -80,6 +80,7 @@ export interface Call {
   agent_id?: number
   campaign_id?: number
   contact_id?: number
+  contact_name?: string  // Contact name if contact exists
   phone_number: string
   direction: string
   status: string

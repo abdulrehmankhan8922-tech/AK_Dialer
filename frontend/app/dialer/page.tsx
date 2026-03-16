@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { authAPI, agentsAPI, callsAPI, statsAPI, campaignsAPI, contactsAPI } from '@/lib/api'
 import { wsManager } from '@/lib/websocket'
@@ -38,6 +38,7 @@ export default function DialerPage() {
   const [campaignStats, setCampaignStats] = useState({ total: 0, active: 0, dialed: 0, failed: 0 })
   const [showCreateCampaignModal, setShowCreateCampaignModal] = useState(false)
   const autoDialTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const dialingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   // Helper function to check if a call is active
   const isCallActive = (call: Call | null): boolean => {
@@ -128,7 +129,7 @@ export default function DialerPage() {
   }
 
   // Auto-dial next contact (Vicidial-style progressive dialing)
-  const handleAutoDialNext = async () => {
+  const handleAutoDialNext = useCallback(async () => {
     // Early return if conditions not met
     if (!autoDialEnabled || !selectedCampaignId) {
       console.log('Auto-dial skipped: conditions not met', { autoDialEnabled, selectedCampaignId })
@@ -147,14 +148,14 @@ export default function DialerPage() {
       autoDialTimeoutRef.current = null
     }
 
-    console.log('Auto-dial triggered: will dial next contact in 2 seconds')
+    console.log('Auto-dial triggered: will dial next contact immediately')
 
-    // Wait 2 seconds before dialing next (Vicidial-style progressive dialing)
+    // Minimal delay for back-to-back dialing (500ms to ensure state is ready)
     autoDialTimeoutRef.current = setTimeout(async () => {
       try {
         // Double-check for active call before dialing (reload from backend)
         const currentCallCheck = await callsAPI.getCurrent()
-        if (currentCallCheck) {
+        if (currentCallCheck && isCallActive(currentCallCheck)) {
           console.log('Active call detected, skipping auto-dial:', currentCallCheck)
           // Update currentCall state
           setCurrentCall(currentCallCheck)
@@ -192,8 +193,8 @@ export default function DialerPage() {
           setAutoDialEnabled(false)
         }
       }
-    }, 2000) // 2 second delay for Vicidial-style progressive dialing
-  }
+    }, 500) // 500ms delay for back-to-back dialing (minimal delay to ensure state is ready)
+  }, [autoDialEnabled, selectedCampaignId, currentCall])
 
   useEffect(() => {
     const initializeDashboard = async () => {
@@ -252,9 +253,34 @@ export default function DialerPage() {
 
         loadCurrentCall().catch(console.error)
 
+        // Poll for current call more frequently to catch all status changes
         const callInterval = setInterval(() => {
           loadCurrentCall().catch(console.error)
-        }, 2000)
+        }, 1000) // Poll every 1 second for faster updates
+        
+        // AGGRESSIVE check for stuck DIALING calls every 3 seconds
+        // This checks the backend directly to catch stuck calls even if frontend state is stale
+        const stuckCallCheckInterval = setInterval(async () => {
+          try {
+            const call = await callsAPI.getCurrent()
+            if (call && call.status === 'dialing' && call.start_time) {
+              const startTime = new Date(call.start_time).getTime()
+              const now = Date.now()
+              const dialingDuration = (now - startTime) / 1000 // seconds
+              if (dialingDuration >= 30) {
+                console.warn(`🚨 STUCK DIALING call detected: ${dialingDuration}s (>=30s), IMMEDIATELY clearing`)
+                // IMMEDIATELY clear from UI first
+                setCurrentCall(null)
+                // Then try to hangup (don't wait)
+                callsAPI.hangup(call.id).catch(() => {})
+                loadStats()
+              }
+            }
+          } catch (error) {
+            // Call might not exist - clear UI anyway
+            setCurrentCall(null)
+          }
+        }, 3000) // Check every 3 seconds (more aggressive)
 
         const statsInterval = setInterval(() => {
           loadStats().catch(console.error)
@@ -264,8 +290,12 @@ export default function DialerPage() {
           clearInterval(timeInterval)
           clearInterval(callInterval)
           clearInterval(statsInterval)
+          clearInterval(stuckCallCheckInterval)
           if (autoDialTimeoutRef.current) {
             clearTimeout(autoDialTimeoutRef.current)
+          }
+          if (dialingTimeoutRef.current) {
+            clearTimeout(dialingTimeoutRef.current)
           }
           wsManager.off('call_update', handleCallUpdate)
           wsManager.off('incoming_call', handleIncomingCall)
@@ -296,8 +326,8 @@ export default function DialerPage() {
     }
   }, [selectedCampaignId, contactTab])
 
-  // Auto-dial when call ends (Vicidial-style progressive dialing)
-  // This useEffect ensures auto-dial triggers when currentCall becomes null
+  // Auto-dial when call ends OR when auto-dial checkbox is enabled (Vicidial-style progressive dialing)
+  // This useEffect ensures auto-dial triggers when currentCall becomes null OR when auto-dial is enabled
   useEffect(() => {
     // Only trigger if:
     // 1. Auto-dial is enabled
@@ -305,17 +335,16 @@ export default function DialerPage() {
     // 3. No current call (agent is available)
     // 4. Not already in a dialing timeout
     if (!currentCall && autoDialEnabled && selectedCampaignId && !autoDialTimeoutRef.current) {
-      console.log('Auto-dial useEffect triggered: conditions met, will call handleAutoDialNext')
-      // Small delay to ensure all state updates are complete
-      const timeoutId = setTimeout(() => {
-        handleAutoDialNext()
-      }, 500) // 500ms delay to ensure state is fully updated
-      
-      return () => {
-        clearTimeout(timeoutId)
-      }
+      console.log('Auto-dial useEffect triggered: conditions met', { 
+        currentCall: null, 
+        autoDialEnabled, 
+        selectedCampaignId,
+        hasTimeout: !!autoDialTimeoutRef.current
+      })
+      // Immediate trigger - no delay for back-to-back dialing
+      handleAutoDialNext()
     }
-  }, [currentCall, autoDialEnabled, selectedCampaignId])
+  }, [currentCall, autoDialEnabled, selectedCampaignId, handleAutoDialNext])
 
   const loadStats = async () => {
     try {
@@ -344,6 +373,51 @@ export default function DialerPage() {
         }
         return
       }
+      
+      // IMMEDIATE check if call is stuck in DIALING status for more than 30 seconds
+      if (call.status === 'dialing' && call.start_time) {
+        const startTime = new Date(call.start_time).getTime()
+        const now = Date.now()
+        const dialingDuration = (now - startTime) / 1000 // seconds
+        if (dialingDuration >= 30) {
+          console.warn(`🚨 Call ${call.id} stuck in DIALING for ${dialingDuration}s (>=30s), IMMEDIATELY clearing`)
+          // Clear any existing timeout
+          if (dialingTimeoutRef.current) {
+            clearTimeout(dialingTimeoutRef.current)
+            dialingTimeoutRef.current = null
+          }
+          // IMMEDIATELY clear the call from UI first
+          setCurrentCall(null)
+          // Then try to hangup (don't wait for response)
+          callsAPI.hangup(call.id).catch(() => {})
+          loadStats()
+          return
+        }
+        // Set timeout for dialing calls that haven't reached 30s yet
+        if (!currentCall || currentCall.id !== call.id || currentCall.status !== 'dialing') {
+          // Clear any existing timeout
+          if (dialingTimeoutRef.current) {
+            clearTimeout(dialingTimeoutRef.current)
+          }
+          // Calculate remaining time until 30 seconds
+          const remaining = Math.max(0, 30 - dialingDuration) * 1000 // milliseconds
+          // Set timeout to clear after remaining time
+          dialingTimeoutRef.current = setTimeout(() => {
+            console.warn(`🚨 Dialing timeout (30s) reached, clearing call ${call.id}`)
+            setCurrentCall(null)
+            callsAPI.hangup(call.id).catch(() => {})
+            loadStats()
+            dialingTimeoutRef.current = null
+          }, remaining)
+        }
+      } else {
+        // Not dialing - clear timeout
+        if (dialingTimeoutRef.current) {
+          clearTimeout(dialingTimeoutRef.current)
+          dialingTimeoutRef.current = null
+        }
+      }
+      
       // Only update if call is different
       if (!currentCall || currentCall.id !== call.id) {
         setCurrentCall(call)
@@ -356,8 +430,11 @@ export default function DialerPage() {
     }
   }
 
-  const handleCallUpdate = (data: any) => {
+  const handleCallUpdate = async (data: any) => {
+    console.log('📞 Call update received:', data)
+    
     const endedStatuses = ['ended', 'failed', 'busy', 'no_answer', 'transferred', 'parked']
+    
     if (data.status && endedStatuses.includes(data.status)) {
       console.log('Call ended, status:', data.status, 'Will refresh contact lists and trigger auto-dial if enabled')
       // Immediately clear current call
@@ -379,10 +456,42 @@ export default function DialerPage() {
       return
     }
     
+    // For ALL status changes (dialing, ringing, connected, answered), reload current call
+    // This ensures UI always shows the latest status IMMEDIATELY
     if (data.call_id) {
-      loadCurrentCall()
-    } else {
-      loadCurrentCall()
+      console.log('📞 Updating call status:', data.status, 'for call_id:', data.call_id)
+      
+      // Immediately update UI from the data we received (don't wait for API call)
+      if (currentCall && currentCall.id === data.call_id) {
+        // Update existing call object immediately
+        setCurrentCall({
+          ...currentCall,
+          status: data.status,
+          phone_number: data.phone_number || currentCall.phone_number,
+          direction: data.direction || currentCall.direction
+        })
+        console.log('✅ Call updated immediately in UI:', data.status, data.phone_number)
+      }
+      
+      // Then reload from backend to get full details (non-blocking)
+      try {
+        const updatedCall = await callsAPI.getCurrent()
+        if (updatedCall) {
+          setCurrentCall(updatedCall)
+          console.log('✅ Call fully updated from backend:', updatedCall.status, updatedCall.phone_number)
+        } else if (endedStatuses.includes(data.status)) {
+          // If call ended but getCurrent returns null, clear it
+          setCurrentCall(null)
+          console.log('✅ Call ended, cleared from UI')
+        }
+      } catch (error) {
+        console.error('Error loading current call after update:', error)
+        // If error and we don't have currentCall, try to construct from data
+        if (!currentCall && data.call_id && data.status && data.phone_number) {
+          // This is a new call - we'll get it from the next poll
+          console.log('⚠️ New call detected but not in currentCall, will be picked up by polling')
+        }
+      }
     }
   }
 
@@ -571,7 +680,7 @@ export default function DialerPage() {
             {currentCall && isCallActive(currentCall) ? (
               <span className="inline-flex items-center px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-bold shadow-lg">
                 <span className="w-2 h-2 bg-white rounded-full animate-pulse mr-2"></span>
-                LIVE CALL - {currentCall.phone_number}
+                LIVE CALL - {currentCall.phone_number || 'Unknown'}
               </span>
             ) : (
               <span className="inline-flex items-center px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-100 text-sm font-semibold">
