@@ -11,6 +11,8 @@ from app.services.ami_event_listener import ami_event_listener
 import asyncio
 import logging
 
+# Configure logging so all application logs are visible
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Note: Database tables are created via SQL script (database_schema.sql)

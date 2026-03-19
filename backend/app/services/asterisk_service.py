@@ -251,6 +251,32 @@ class AsteriskService:
         response = await self.send_action('Redirect', params)
         return response.get('Response') == 'Success'
     
+    async def run_cli_command(self, command: str) -> str:
+        """Run an Asterisk CLI command via AMI and return its output."""
+        params = {'Command': command}
+        response = await self.send_action('Command', params)
+        return response.get('Output', '').strip()
+    
+    async def hangup_trunk_channels(self) -> bool:
+        """Hangup ALL active trunk channels. Used as a reliable fallback for 30s timeout."""
+        try:
+            output = await self.run_cli_command('core show channels concise')
+            hung_up = False
+            for line in output.splitlines():
+                parts = line.split('!')
+                if len(parts) >= 1 and parts[0].startswith('PJSIP/trunk'):
+                    channel_name = parts[0]
+                    try:
+                        await self.hangup_call(channel_name)
+                        hung_up = True
+                        print(f"Hung up trunk channel: {channel_name}")
+                    except Exception:
+                        pass
+            return hung_up
+        except Exception as e:
+            print(f"Error hanging up trunk channels: {e}")
+            return False
+    
     async def disconnect(self):
         """Disconnect from Asterisk AMI"""
         if self.connection:

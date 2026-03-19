@@ -66,6 +66,11 @@ async def dial(
                     if contact:
                         contact.status = ContactStatus.FAILED
                 db.commit()
+                # Hang up trunk channels to stop the actual Asterisk call
+                try:
+                    await dialer_service.asterisk_service.hangup_trunk_channels()
+                except Exception:
+                    pass
                 # Continue with new call
             # Check if call is stuck in CONNECTED/ANSWERED (older than 2 hours - likely stale)
             elif active_call.status in [CallStatus.CONNECTED.value, CallStatus.ANSWERED.value] and time_diff and time_diff > 7200:  # 2 hours
@@ -128,7 +133,16 @@ async def dial(
             call_unique_id=call_unique_id
         )
         db.add(call)
-        db.flush()  # Flush to get the ID without committing
+        # Update agent status
+        agent.status = AgentStatus.IN_CALL.value
+        # CRITICAL: Commit BEFORE Originate so AMI event listener can find this DIALING record
+        # when the trunk channel appears (fixes race condition for 2nd+ auto-dial calls)
+        db.commit()
+        db.refresh(call)
+        
+        # Register call in channel tracker BEFORE originate
+        from app.services.channel_tracker import channel_tracker
+        channel_tracker.register_call(call.call_unique_id)
         
         # Initiate call via dialer service
         call_result = await dialer_service.initiate_call(
@@ -138,20 +152,12 @@ async def dial(
             contact_id=None if dial_request.softphone_dial else dial_request.contact_id
         )
         
-        # Update call status
-        call.status = call_result.get("status", CallStatus.DIALING)
+        # Update call with asterisk channel info
         call.freeswitch_channel = call_result.get("asterisk_channel") or call_result.get("freeswitch_channel")
-        
-        # Update agent status
-        agent.status = AgentStatus.IN_CALL.value
-        
-        # Single commit for all changes
+        if call_result.get("status") and call_result["status"] != CallStatus.DIALING:
+            call.status = call_result["status"]
         db.commit()
         db.refresh(call)
-        
-        # Register call in channel tracker
-        from app.services.channel_tracker import channel_tracker
-        channel_tracker.register_call(call.call_unique_id)
         
         # Send WebSocket update (non-blocking)
         try:
@@ -495,8 +501,50 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
                 agent = db.query(Agent).filter(Agent.id == agent_id).first()
                 if agent:
                     agent.status = AgentStatus.AVAILABLE.value
+                # Update contact status if exists
+                if call.contact_id:
+                    from app.models.contact import Contact, ContactStatus
+                    contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+                    if contact:
+                        contact.status = ContactStatus.FAILED
                 db.commit()
+                # Hang up the Asterisk call so the phone stops ringing
+                try:
+                    await dialer_service.hangup_call(call.call_unique_id)
+                except Exception:
+                    pass
+                # Fallback: hang up ALL trunk channels (reliable when channel tracking fails)
+                try:
+                    await dialer_service.asterisk_service.hangup_trunk_channels()
+                except Exception:
+                    pass
                 return {"call": None}
+            # Check if call is stuck in RINGING (ringing for > 30 seconds without answer)
+            elif call.status == CallStatus.RINGING.value and call.ring_time and not call.answered_time:
+                ring_secs = (current_time - call.ring_time).total_seconds()
+                if ring_secs > 30:
+                    logger.warning(f"Call {call.id} stuck in RINGING for {ring_secs}s, marking as no answer")
+                    call.status = CallStatus.NO_ANSWER.value
+                    call.end_time = current_time
+                    call.ring_duration = int(ring_secs)
+                    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                    if agent:
+                        agent.status = AgentStatus.AVAILABLE.value
+                    if call.contact_id:
+                        from app.models.contact import Contact, ContactStatus
+                        contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+                        if contact:
+                            contact.status = ContactStatus.NOT_ANSWERED
+                    db.commit()
+                    try:
+                        await dialer_service.hangup_call(call.call_unique_id)
+                    except Exception:
+                        pass
+                    try:
+                        await dialer_service.asterisk_service.hangup_trunk_channels()
+                    except Exception:
+                        pass
+                    return {"call": None}
             # Check if call is stuck in CONNECTED/ANSWERED (older than 2 hours)
             elif call.status in [CallStatus.CONNECTED.value, CallStatus.ANSWERED.value] and time_diff and time_diff > 7200:
                 logger.warning(f"Call {call.id} stuck in {call.status} status for more than 2 hours, marking as ended")
@@ -517,23 +565,33 @@ async def get_current_call(db: Session = Depends(get_db), agent_id: int = Depend
                             contact.status = ContactStatus.FAILED
                 db.commit()
                 return {"call": None}
-            # Check if call is stuck in RINGING (older than 30 seconds)
-            elif call.status == CallStatus.RINGING.value and time_diff and time_diff > 30:
-                logger.warning(f"Call {call.id} stuck in RINGING status for more than 30 seconds, marking as no answer")
-                call.status = CallStatus.NO_ANSWER.value
-                call.end_time = current_time
-                # Update agent status
-                agent = db.query(Agent).filter(Agent.id == agent_id).first()
-                if agent:
-                    agent.status = AgentStatus.AVAILABLE.value
-                # Update contact status if exists
-                if call.contact_id:
-                    from app.models.contact import Contact, ContactStatus
-                    contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
-                    if contact:
-                        contact.status = ContactStatus.NOT_ANSWERED
-                db.commit()
-                return {"call": None}
+            # Check if call is stuck in RINGING (ringing for more than 30 seconds)
+            elif call.status == CallStatus.RINGING.value:
+                # Use ring_time if available, otherwise fall back to start_time
+                ring_start = call.ring_time or call.start_time
+                if ring_start:
+                    ring_secs = (current_time - ring_start).total_seconds()
+                    if ring_secs > 30:
+                        logger.warning(f"Call {call.id} ringing for {ring_secs:.0f}s (>30s), marking as no answer")
+                        call.status = CallStatus.NO_ANSWER.value
+                        call.end_time = current_time
+                        # Update agent status
+                        agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                        if agent:
+                            agent.status = AgentStatus.AVAILABLE.value
+                        # Update contact status if exists
+                        if call.contact_id:
+                            from app.models.contact import Contact, ContactStatus
+                            contact = db.query(Contact).filter(Contact.id == call.contact_id).first()
+                            if contact:
+                                contact.status = ContactStatus.NOT_ANSWERED
+                        db.commit()
+                        # Hang up the Asterisk call
+                        try:
+                            await dialer_service.hangup_call(call.call_unique_id)
+                        except Exception:
+                            pass
+                        return {"call": None}
         
         # Additional check: if call has end_time set, it's ended (even if status is wrong)
         if call and call.end_time:

@@ -350,6 +350,25 @@ class AMIEventListener:
         if not call_unique_id:
             db = SessionLocal()
             try:
+                # CRITICAL: If this is a trunk channel AND there's an active DIALING outbound call,
+                # this is the customer leg of an AMI-originated call - link to existing call, NOT new inbound
+                if self._is_trunk_channel(channel):
+                    active_outbound = db.query(Call).filter(
+                        Call.status == CallStatus.DIALING.value,
+                        Call.direction == CallDirection.OUTBOUND.value,
+                        Call.end_time.is_(None)
+                    ).order_by(Call.start_time.desc()).first()
+                    
+                    if active_outbound:
+                        call_unique_id = active_outbound.call_unique_id
+                        channel_tracker.register_call(call_unique_id)
+                        channel_tracker.set_customer_channel(call_unique_id, channel, uniqueid)
+                        active_outbound.customer_channel = channel
+                        db.commit()
+                        logger.info(f"🔗 Linked trunk channel {channel} to outbound call {call_unique_id} ({active_outbound.phone_number})")
+                        db.close()
+                        return
+                
                 agent = None
                 direction = None
                 phone_number = None
@@ -376,31 +395,43 @@ class AMIEventListener:
                 # SECONDARY: Detect outbound calls (from internal extensions)
                 # Only if NOT already identified as inbound
                 elif context == 'from-internal' or (context and 'internal' in context.lower()):
-                    # Check if this might be an extension channel for an inbound call
-                    # (when Asterisk dials the extension, it creates a new channel)
                     extension = self._extract_extension_from_channel(channel)
                     
-                    # If this is an extension channel but we already have an inbound call being dialed,
-                    # don't create a new call - it's part of the inbound call flow
                     if extension:
-                        # Check if there's an active inbound call that might be dialing this extension
-                        # We'll handle this in DialBegin event instead
-                        # For now, only create outbound if we're sure it's outbound
-                        # Outbound calls have the dialed number in exten, not an extension number
-                        if exten and exten not in ['8013', '8014', '9000'] and not exten.startswith('+'):
+                        # Check if this agent already has an active outbound call
+                        # If so, this is the agent softphone leg - link it, don't create new record
+                        agent_for_check = db.query(Agent).filter(Agent.phone_extension == extension).first()
+                        if agent_for_check:
+                            active_outbound = db.query(Call).filter(
+                                Call.agent_id == agent_for_check.id,
+                                Call.status.in_([CallStatus.DIALING.value, CallStatus.RINGING.value, CallStatus.CONNECTED.value, CallStatus.ANSWERED.value]),
+                                Call.direction == CallDirection.OUTBOUND.value,
+                                Call.end_time.is_(None)
+                            ).order_by(Call.start_time.desc()).first()
+                            
+                            if active_outbound:
+                                # Link as agent channel to existing outbound call
+                                cuid = active_outbound.call_unique_id
+                                if cuid not in channel_tracker.call_channels:
+                                    channel_tracker.register_call(cuid)
+                                channel_tracker.set_agent_channel(cuid, channel, uniqueid)
+                                active_outbound.agent_channel = channel
+                                db.commit()
+                                logger.info(f"🔗 Linked agent channel {channel} to outbound call {cuid} ({active_outbound.phone_number})")
+                                db.close()
+                                return
+                        
+                        # Only create outbound if exten is a real phone number (not 's', not agent ext)
+                        if exten and exten not in ['s', '8013', '8014', '9000'] and not exten.startswith('+') and len(exten) > 4:
                             direction = CallDirection.OUTBOUND
-                            # Find agent by extension
-                            agent = db.query(Agent).filter(Agent.phone_extension == extension).first()
-                            # Phone number is the dialed number
+                            agent = agent_for_check
                             phone_number = exten.lstrip('+')
                             logger.info(f"✓ Detected OUTBOUND call: channel={channel}, context={context}, phone={phone_number}, extension={extension}")
                         else:
-                            # This might be an extension channel for an inbound call, skip creating call here
-                            # The DialBegin event will handle associating it with the inbound call
                             direction = None
                             agent = None
                             phone_number = None
-                            logger.debug(f"⏭ Skipping extension channel (likely part of inbound flow): channel={channel}, extension={extension}, exten={exten}")
+                            logger.debug(f"⏭ Skipping extension channel (part of existing call flow): channel={channel}, extension={extension}, exten={exten}")
                     else:
                         direction = CallDirection.OUTBOUND
                         # Extract extension from channel if possible

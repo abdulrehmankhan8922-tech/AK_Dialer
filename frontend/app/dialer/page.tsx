@@ -173,8 +173,8 @@ export default function DialerPage() {
         }
 
         console.log('Auto-dialing contact:', nextContact.phone)
-        await callsAPI.dial(nextContact.phone, selectedCampaignId, nextContact.id)
-        loadCurrentCall()
+        const dialResult = await callsAPI.dial(nextContact.phone, selectedCampaignId, nextContact.id)
+        if (dialResult && dialResult.id) setCurrentCall(dialResult)
         loadStats()
         loadContacts()
         autoDialTimeoutRef.current = null
@@ -338,21 +338,16 @@ export default function DialerPage() {
     try {
       const call = await callsAPI.getCurrent()
       if (!call || !isCallActive(call)) {
-        // Only update if it's actually different to avoid unnecessary re-renders
-        if (currentCall !== null) {
-          setCurrentCall(null)
-        }
+        // Always clear - React ignores if already null (no re-render)
+        // CRITICAL: Don't check currentCall here - closure may be stale from setInterval
+        setCurrentCall(null)
         return
       }
-      // Only update if call is different
-      if (!currentCall || currentCall.id !== call.id) {
-        setCurrentCall(call)
-      }
+      // Always update - so status changes (dialing→ringing→answered) show in UI
+      setCurrentCall(call)
     } catch (error) {
       console.error('Error loading current call:', error)
-      if (currentCall !== null) {
-        setCurrentCall(null)
-      }
+      setCurrentCall(null)
     }
   }
 
@@ -447,8 +442,8 @@ export default function DialerPage() {
         return
       }
 
-      await callsAPI.dial(nextContact.phone, selectedCampaignId, nextContact.id)
-      loadCurrentCall()
+      const dialResult = await callsAPI.dial(nextContact.phone, selectedCampaignId, nextContact.id)
+      if (dialResult && dialResult.id) setCurrentCall(dialResult)
       loadStats()
       loadContacts()
     } catch (error: any) {
