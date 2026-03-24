@@ -95,6 +95,7 @@ export interface Call {
   is_on_hold?: boolean
   disposition?: string
   notes?: string
+  contact_name?: string
 }
 
 export interface Contact {

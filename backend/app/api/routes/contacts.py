@@ -248,12 +248,13 @@ async def get_next_contact(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Build query for next contact - only NEW contacts (one attempt per contact)
-    # Exclude: FAILED, CONTACTED, DO_NOT_CALL, NOT_ANSWERED, BUSY (all failures go to failed list)
-    # Rule: Each contact is dialed ONCE only
+    # Build query for next contact - contacts with < 2 dial attempts
+    # Exclude: FAILED, CONTACTED, DO_NOT_CALL (terminal states)
+    # Allow: NEW and NOT_ANSWERED/BUSY (for retry up to 2 attempts)
+    excluded_statuses = [ContactStatus.FAILED.value, ContactStatus.CONTACTED.value, ContactStatus.DO_NOT_CALL.value]
     query = db.query(Contact).filter(
-        Contact.status == ContactStatus.NEW.value,  # Only NEW contacts - one attempt only
-        Contact.status != ContactStatus.DO_NOT_CALL.value
+        Contact.status.notin_(excluded_statuses),
+        (Contact.dial_attempts == None) | (Contact.dial_attempts < 2)  # Max 2 attempts
     )
     
     # Filter by campaign if provided or agent has campaign

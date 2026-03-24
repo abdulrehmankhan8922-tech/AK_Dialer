@@ -119,7 +119,10 @@ async def dial(
                 # Update contact dialing info
                 contact.last_dialed_at = datetime.now(timezone.utc)
                 contact.dial_attempts = (contact.dial_attempts or 0) + 1
-                # Don't change status yet - will update based on call result
+                # If 2+ attempts and never successfully contacted, mark as FAILED
+                if contact.dial_attempts >= 2 and contact.status != ContactStatus.CONTACTED.value:
+                    contact.status = ContactStatus.FAILED
+                    logger.info(f"Contact {contact.id} ({contact.phone}) marked FAILED after {contact.dial_attempts} attempts")
         
         # Create call record
         call_unique_id = str(uuid.uuid4())
